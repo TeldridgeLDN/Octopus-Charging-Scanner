@@ -27,10 +27,12 @@ class DataStore:
     FORECAST_FILE = DATA_DIR / "forecast_history.json"
     RECOMMENDATIONS_FILE = DATA_DIR / "daily_recommendations.json"
     USER_ACTIONS_FILE = DATA_DIR / "user_actions.json"
+    EVOLUTION_FILE = DATA_DIR / "forecast_evolution.json"
 
     FORECAST_RETENTION_DAYS = 7
     RECOMMENDATION_RETENTION_DAYS = 30
     USER_ACTION_RETENTION_DAYS = 90
+    EVOLUTION_RETENTION_DAYS = 30
 
     def __init__(self, data_dir: Optional[Path] = None):
         """Initialize data store.
@@ -43,6 +45,7 @@ class DataStore:
             self.FORECAST_FILE = self.DATA_DIR / "forecast_history.json"
             self.RECOMMENDATIONS_FILE = self.DATA_DIR / "daily_recommendations.json"
             self.USER_ACTIONS_FILE = self.DATA_DIR / "user_actions.json"
+            self.EVOLUTION_FILE = self.DATA_DIR / "forecast_evolution.json"
 
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         logger.info(f"Data store initialized at {self.DATA_DIR}")
@@ -273,7 +276,50 @@ class DataStore:
             self._save_json(self.USER_ACTIONS_FILE, new_actions)
             logger.info(f"Removed {removed_actions} old user actions")
 
+        # Clean forecast evolution
+        removed_evolution = self._cleanup_forecast_evolution()
+        if removed_evolution > 0:
+            logger.info(f"Removed {removed_evolution} old forecast evolution entries")
+
         logger.info("Data cleanup complete")
+
+    def _cleanup_forecast_evolution(self) -> int:
+        """Clean up old forecast evolution data.
+
+        Removes evolution entries for target dates older than retention period.
+
+        Returns:
+            Number of entries removed
+        """
+        if not self.EVOLUTION_FILE.exists():
+            return 0
+
+        try:
+            with open(self.EVOLUTION_FILE, "r") as f:
+                evolution_data = json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return 0
+
+        if "target_forecasts" not in evolution_data:
+            return 0
+
+        cutoff = datetime.now() - timedelta(days=self.EVOLUTION_RETENTION_DAYS)
+        original_count = len(evolution_data["target_forecasts"])
+
+        # Remove old entries (target dates that have passed beyond retention)
+        evolution_data["target_forecasts"] = {
+            target_date: data
+            for target_date, data in evolution_data["target_forecasts"].items()
+            if datetime.strptime(target_date, "%Y-%m-%d") >= cutoff
+        }
+
+        removed = original_count - len(evolution_data["target_forecasts"])
+
+        if removed > 0:
+            evolution_data["metadata"]["last_cleanup"] = datetime.now().isoformat()
+            self._save_json(self.EVOLUTION_FILE, evolution_data)
+
+        return removed
 
     def _load_json(self, file_path: Path, default: Any = None) -> Any:
         """Load JSON data from file with error handling.

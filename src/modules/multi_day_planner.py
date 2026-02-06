@@ -112,6 +112,9 @@ class MultiDayPlanner:
         # Compare each day
         comparisons = self._compare_days(multi_day_data, kwh)
 
+        # Record forecast evolution snapshots
+        self._record_evolution_snapshots(comparisons)
+
         # Identify best day
         best_day = self._identify_best_day(comparisons)
 
@@ -387,3 +390,34 @@ class MultiDayPlanner:
 
         except Exception as e:
             logger.error(f"Failed to save plan: {e}")
+
+    def _record_evolution_snapshots(self, comparisons: List[DayComparison]) -> None:
+        """Record forecast evolution snapshots for each day.
+
+        Args:
+            comparisons: List of day comparisons from the plan
+        """
+        try:
+            from .forecast_evolution import ForecastEvolutionTracker
+            from .forecast_tracker import ForecastTracker
+
+            evolution_tracker = ForecastEvolutionTracker()
+            forecast_tracker = ForecastTracker()
+
+            # Get historical accuracy for confidence calculation
+            accuracy = forecast_tracker.get_recent_accuracy(7)
+            historical_mae = accuracy.get("mean_absolute_error") if accuracy else None
+
+            # Record snapshot for each future day
+            for comparison in comparisons:
+                evolution_tracker.record_snapshot(
+                    target_date=comparison.date,
+                    day_comparison=comparison,
+                    historical_mae=historical_mae,
+                )
+
+            logger.info(f"Recorded evolution snapshots for {len(comparisons)} days")
+
+        except Exception as e:
+            # Log but don't fail the plan generation
+            logger.warning(f"Failed to record evolution snapshots: {e}")
