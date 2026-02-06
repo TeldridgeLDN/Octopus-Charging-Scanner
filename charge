@@ -1,0 +1,49 @@
+#!/bin/bash
+# Quick charge planner alias
+# Usage: ./charge 57 80
+#        ./charge 45 70 06:00
+#        ./charge 57 80 --notify
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ $# -eq 0 ]; then
+    echo "Usage: ./charge <current%> [target%] [deadline] [--notify]"
+    echo ""
+    echo "Examples:"
+    echo "  ./charge 57              # Charge to 80% by 8 AM"
+    echo "  ./charge 57 75           # Charge to 75% by 8 AM"
+    echo "  ./charge 57 80 06:00     # Charge to 80% by 6 AM"
+    echo "  ./charge 57 80 --notify  # Send Pushover notification"
+    echo ""
+    exit 1
+fi
+
+CURRENT=$1
+shift
+
+# Parse remaining arguments
+TARGET=80
+DEADLINE="08:00"
+NOTIFY_FLAG=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --notify|-n)
+            NOTIFY_FLAG="--notify"
+            shift
+            ;;
+        *)
+            if [ -z "${TARGET_SET}" ]; then
+                TARGET=$1
+                TARGET_SET=1
+            elif [ -z "${DEADLINE_SET}" ]; then
+                DEADLINE=$1
+                DEADLINE_SET=1
+            fi
+            shift
+            ;;
+    esac
+done
+
+cd "$SCRIPT_DIR" || exit 1
+python src/scripts/smart_charge_planner.py --current "$CURRENT" --target "$TARGET" --deadline "$DEADLINE" $NOTIFY_FLAG

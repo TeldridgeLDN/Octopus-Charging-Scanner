@@ -1,0 +1,61 @@
+# EV Charging Optimizer Configuration
+# Edit this file to customize your preferences
+
+# User settings
+user:
+  postcode: "E1"              # Your postcode for carbon intensity data (deprecated)
+  carbon_region_id: 13        # Carbon Intensity region ID (13 = London, see docs for others)
+  region: "H"                 # Octopus Agile region (H = Southern England/London)
+  charging_rate_kw: 2.3       # Your charger power rating in kW
+  typical_charge_kwh: 20      # Typical charge amount in kWh
+
+# Price and carbon thresholds (adjust based on observed data)
+thresholds:
+  price_excellent: 10         # pence/kWh - EXCELLENT threshold
+  price_good: 15              # pence/kWh - GOOD threshold
+  carbon_excellent: 100       # gCO2/kWh - EXCELLENT threshold
+  carbon_good: 150            # gCO2/kWh - GOOD threshold
+
+# Weighting between cost and carbon (must sum to 1.0)
+preferences:
+  price_weight: 0.6           # 60% weight on price
+  carbon_weight: 0.4          # 40% weight on carbon
+
+# Notification schedule
+notifications:
+  daily_time: "16:00"         # When to send daily recommendation
+  reminder_time: "20:00"      # When to send evening reminder
+  weekly_summary_time: "18:00"  # Sunday evening summary
+  appliance_time: "06:00"     # Morning appliance planner
+  max_per_day: 5              # Maximum notifications per day
+
+# API configuration
+apis:
+  octopus:
+    region: "H"
+    product: "AGILE-24-10-01"
+    tariff_code: "E-1R-AGILE-24-10-01-H"
+
+  forecast:
+    url: "https://energy.guylipman.com/forecasts"
+    update_interval_hours: 6
+
+  carbon:
+    base_url: "https://api.carbonintensity.org.uk"
+    update_interval_hours: 12
+
+  pushover:
+    # Credentials loaded from .env file
+    # PUSHOVER_USER_KEY and PUSHOVER_API_TOKEN
+    sounds:
+      excellent: "cashregister"
+      good: "cosmic"
+      reminder: "pushover"
+      summary: "pushover"
+
+# Data retention (days)
+data_retention:
+  forecast_history: 7
+  recommendations: 30
+  user_actions: 0  # 0 = keep forever
+  logs: 14

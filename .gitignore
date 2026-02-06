@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+
+# Data and logs
+data/*.json
+!data/.gitkeep
+logs/*.log
+!logs/.gitkeep
+charts/*.png
+!charts/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# TaskMaster (keep structure, not tasks)
+.taskmaster/tasks/
+!.taskmaster/tasks/.gitkeep
