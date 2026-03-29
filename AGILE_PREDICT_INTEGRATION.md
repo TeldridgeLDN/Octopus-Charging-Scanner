@@ -29,6 +29,10 @@ slots with **confidence intervals** (p10/p90 bands).
 
 ### API Call
 
+Region `H` = Southern England / London — used as the default for accurate London
+pricing and weather data. Read from `config["user"]["region"]` at runtime; do not
+hardcode.
+
 ```
 GET https://prices.fly.dev/api/H/?days=14&high_low=true
 ```
@@ -106,6 +110,7 @@ Inherit from `BaseAPIClient` in `octopus_api.py` (already has retry logic).
 ```yaml
   agile_predict:
     base_url: "https://prices.fly.dev"
+    default_region: "H"               # H = Southern England / London — accurate pricing & weather
     days: 14
     high_low: true
     confidence_narrow_threshold: 5.0   # p/kWh band = "high confidence"
@@ -207,4 +212,4 @@ Check `logs/daily_notification.log` for output.
 - Do not remove Guy Lipman client — keep as final fallback
 - Do not change `PriceSlot` dataclass signature (breaks analyzer)
 - Do not send notifications during testing — check `is_exceptional` gating in main()
-- Do not hardcode region — read from `config["user"]["region"]`
+- Do not hardcode region — read from `config["user"]["region"]` (defaults to `H` = London)
