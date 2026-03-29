@@ -424,6 +424,9 @@ def format_notification(
     # Add "better day ahead" hint if a future day is cheaper
     if better_day_hint:
         message += better_day_hint
+        # Sharpen the action line when we know a specific better day exists
+        if rating in (OpportunityRating.AVERAGE, OpportunityRating.POOR):
+            action = "Wait — a cheaper day is coming (see above)"
 
     message += f"\n<b>Action:</b> {action}"
 
