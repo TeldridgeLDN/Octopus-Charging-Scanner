@@ -1,8 +1,8 @@
 """Multi-Day Planning Module
 
-Compares charging costs across multiple days (default 7) to help users
+Compares charging costs across multiple days (default 7, max 14) to help users
 make informed deferral decisions. Uses actual Octopus prices when available,
-falls back to Guy Lipman forecasts for days beyond 48 hours.
+falls back to agile_predict ML forecasts (14-day), then Guy Lipman as last resort.
 """
 
 from typing import Dict, List, Any, Optional, Tuple
@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import logging
 
 from .octopus_api import OctopusAPIClient
+from .agile_predict_api import AgilePredict
 from .forecast_api import ForecastAPIClient
 from .carbon_api import CarbonAPIClient
 from .analyzer import (
@@ -58,7 +59,7 @@ class MultiDayPlanner:
     actual prices for days 0-1, Guy Lipman forecasts for days 2-6.
     """
 
-    # Day names for display
+    # Day names for display (supports up to 14 days via agile_predict)
     DAY_NAMES = [
         "Today",
         "Tomorrow",
@@ -67,6 +68,13 @@ class MultiDayPlanner:
         "Day 5",
         "Day 6",
         "Day 7",
+        "Day 8",
+        "Day 9",
+        "Day 10",
+        "Day 11",
+        "Day 12",
+        "Day 13",
+        "Day 14",
     ]
 
     def __init__(
@@ -87,8 +95,9 @@ class MultiDayPlanner:
         self.config = config
         self.analyzer = analyzer
         self.data_store = data_store
-        self.num_days = min(num_days, 7)  # Cap at 7 days (forecast limit)
+        self.num_days = min(num_days, 14)  # Up to 14 days with agile_predict
         self.octopus_client = OctopusAPIClient()
+        self.agile_predict_client = AgilePredict()
         self.forecast_client = ForecastAPIClient()
         self.carbon_client = CarbonAPIClient()
 
@@ -157,6 +166,16 @@ class MultiDayPlanner:
             logger.error(f"Failed to fetch Octopus prices: {e}")
             octopus_prices = []
 
+        # Fetch agile_predict forecast once for all days (primary forecast source)
+        # Returns [] on failure — Guy Lipman scraper used as final fallback per day
+        agile_slots = self.agile_predict_client.get_forecasts(
+            region, days=self.num_days
+        )
+        if agile_slots:
+            logger.info(f"Fetched {len(agile_slots)} agile_predict slots")
+        else:
+            logger.warning("agile_predict unavailable — will fall back to Guy Lipman")
+
         # Get carbon data
         try:
             carbon_data = self.carbon_client.get_intensity(postcode)
@@ -199,12 +218,30 @@ class MultiDayPlanner:
                         f"({len(day_prices)} slots)"
                     )
                 else:
-                    # Not enough Octopus coverage, use forecast
+                    # Not enough Octopus coverage, try forecast sources
                     day_prices = []
 
-            # Fall back to forecast if needed
+            # Primary forecast fallback: agile_predict
+            if not day_prices and agile_slots:
+                for s in agile_slots:
+                    slot_time = datetime.fromisoformat(
+                        s["date_time"].replace("Z", "+00:00")
+                    )
+                    if target_date <= slot_time < day_end:
+                        day_prices.append(
+                            PriceSlot(slot_time, s["agile_pred"], "agile_predict")
+                        )
+
+                if day_prices:
+                    price_source = "agile_predict"
+                    logger.info(
+                        f"Day {day_offset}: Using agile_predict forecast "
+                        f"({len(day_prices)} slots)"
+                    )
+
+            # Final fallback: Guy Lipman scraper
             if not day_prices:
-                logger.info(f"Day {day_offset}: Falling back to forecast")
+                logger.info(f"Day {day_offset}: Falling back to Guy Lipman forecast")
                 try:
                     forecasts = self.forecast_client.get_forecasts(region)
 
@@ -236,10 +273,12 @@ class MultiDayPlanner:
 
                     price_source = "forecast"
                     logger.info(
-                        f"Day {day_offset}: Using forecast ({len(day_prices)} slots)"
+                        f"Day {day_offset}: Using Guy Lipman forecast ({len(day_prices)} slots)"
                     )
                 except Exception as e:
-                    logger.error(f"Failed to fetch forecast for day {day_offset}: {e}")
+                    logger.error(
+                        f"Failed to fetch Guy Lipman forecast for day {day_offset}: {e}"
+                    )
                     # Use empty list, will be handled later
 
             # Filter carbon data for this day
@@ -421,3 +460,77 @@ class MultiDayPlanner:
         except Exception as e:
             # Log but don't fail the plan generation
             logger.warning(f"Failed to record evolution snapshots: {e}")
+
+    def sync_to_calendar(self, plan: MultiDayPlan) -> bool:
+        """Sync plan to Google Calendar if enabled.
+
+        Args:
+            plan: MultiDayPlan to sync
+
+        Returns:
+            True if sync successful or disabled, False on error
+        """
+        cal_config = self.config.get("google_calendar", {})
+
+        if not cal_config.get("enabled", False):
+            logger.debug("Google Calendar sync disabled")
+            return True
+
+        try:
+            from .google_calendar import GoogleCalendarClient
+
+            credentials_path = cal_config.get(
+                "credentials_path", "config/google_credentials.json"
+            )
+            calendar_id = cal_config.get("calendar_id")
+
+            if not calendar_id:
+                logger.warning("Google Calendar ID not configured")
+                return False
+
+            client = GoogleCalendarClient(credentials_path, calendar_id)
+
+            # Convert days to dict format
+            days_data = []
+            for day in plan.days:
+                days_data.append(
+                    {
+                        "date": day.date,
+                        "day_name": day.day_name,
+                        "avg_price": day.avg_price,
+                        "optimal_window": day.optimal_window,
+                        "cost": day.cost,
+                        "rating": day.rating,
+                        "price_source": day.price_source,
+                        "savings_vs_today": day.savings_vs_today,
+                        "avg_carbon": day.avg_carbon,
+                    }
+                )
+
+            reminders = cal_config.get("reminders", [60, 15])
+
+            event_ids = client.create_multi_day_events(
+                days=days_data,
+                kwh=plan.kwh_amount,
+                best_day=plan.best_day,
+                reminders=reminders,
+            )
+
+            logger.info(f"Synced {len(event_ids)} events to Google Calendar")
+
+            # Cleanup old events
+            if cal_config.get("delete_past_events", True):
+                retention_days = cal_config.get("retention_days", 7)
+                cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+                deleted = client.delete_old_events(cutoff)
+                if deleted > 0:
+                    logger.info(f"Cleaned up {deleted} old calendar events")
+
+            return True
+
+        except FileNotFoundError as e:
+            logger.warning(f"Google Calendar credentials not found: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to sync to Google Calendar: {e}")
+            return False
