@@ -28,6 +28,7 @@ from modules.analyzer import (
     OpportunityRating,
     WindowStatus,
 )
+from modules.multi_day_planner import MultiDayPlanner
 import yaml
 from dotenv import load_dotenv
 
@@ -219,11 +220,80 @@ def fetch_forecast_prices(region: str) -> tuple[list[PriceSlot], str]:
         raise RuntimeError("Forecast API failed") from e
 
 
+def build_better_day_hint(config: Dict[str, Any], today_avg_price: float) -> str:
+    """Return a "better day ahead" hint string if a future day is cheaper.
+
+    Fetches agile_predict day summaries and compares against today's average
+    price. Returns a formatted HTML string if any of the next 6 days look
+    meaningfully cheaper (>15% saving), otherwise returns empty string.
+
+    Args:
+        config: Configuration dictionary
+        today_avg_price: Today's optimal window average price in pence/kWh
+
+    Returns:
+        HTML hint string, or "" if no better day found or fetch fails
+    """
+    from modules.agile_predict_api import AgilePredict
+
+    region = config["user"]["region"]
+    threshold_pct = 15.0  # % cheaper to be worth mentioning
+
+    try:
+        client = AgilePredict()
+        summaries = client.get_day_summary(region, days=7)
+    except Exception as e:
+        logger.debug(f"agile_predict day summary fetch failed: {e}")
+        return ""
+
+    if not summaries:
+        return ""
+
+    # Skip today (first entry) — find best future day
+    future = summaries[1:] if len(summaries) > 1 else []
+    if not future:
+        return ""
+
+    best = min(future, key=lambda s: s["avg_pred"])
+    saving_pct = (today_avg_price - best["avg_pred"]) / today_avg_price * 100
+
+    if saving_pct < threshold_pct:
+        return ""
+
+    # Format the day name (Tomorrow / Day N)
+    from datetime import date as date_type
+
+    today = date_type.today()
+    try:
+        best_date = date_type.fromisoformat(best["date"])
+        delta = (best_date - today).days
+        if delta == 1:
+            day_label = "Tomorrow"
+        else:
+            day_label = best_date.strftime("%A")  # e.g. "Wednesday"
+    except ValueError:
+        day_label = "a future day"
+
+    confidence = best["confidence"]
+    hint = (
+        f"\n<b>💡 Better day ahead:</b> {day_label} looks cheaper — "
+        f"{best['avg_pred']:.1f}p/kWh vs {today_avg_price:.1f}p today "
+        f"({saving_pct:.0f}% less, {confidence})\n"
+    )
+    logger.info(
+        f"Better day hint: {day_label} at {best['avg_pred']:.1f}p "
+        f"({saving_pct:.0f}% cheaper, {confidence})"
+    )
+    return hint
+
+
 def format_notification(
     window: ChargingWindow,
     config: Dict[str, Any],
     price_source: str = "octopus_actual",
     current_time: datetime = None,
+    acix_insights: str = "",
+    better_day_hint: str = "",
 ) -> tuple[str, str, int, str]:
     """Format charging recommendation notification.
 
@@ -232,6 +302,7 @@ def format_notification(
         config: Configuration dictionary
         price_source: Source of price data ("octopus_actual" or "forecast")
         current_time: Current time for status checking (defaults to now)
+        acix_insights: Optional ACIX behavioral insights text
 
     Returns:
         Tuple of (title, message, priority, sound)
@@ -351,9 +422,200 @@ def format_notification(
     else:
         message += "<b>📊 Data:</b> Forecast prices (predicted)\n"
 
-    message += f"<b>Action:</b> {action}"
+    # Add ACIX behavioral insights if available
+    if acix_insights:
+        message += "\n<b>🧠 Your Charging Stats:</b>\n"
+        message += acix_insights + "\n"
+
+    # Add "better day ahead" hint if a future day is cheaper
+    if better_day_hint:
+        message += better_day_hint
+
+    message += f"\n<b>Action:</b> {action}"
 
     return title, message, priority, sound
+
+
+def get_acix_insights(
+    data_store: DataStore, config: Dict[str, Any]
+) -> tuple[str, bool]:
+    """Get ACIX behavioral insights for notification.
+
+    Args:
+        data_store: DataStore instance
+        config: Configuration dictionary
+
+    Returns:
+        Tuple of (insights_text, has_significant_insights)
+    """
+    acix_config = config.get("acix", {})
+    if not acix_config.get("enabled", False):
+        return "", False
+
+    try:
+        from modules.recommendation_analyzer import RecommendationAnalyzer
+
+        rec_analyzer = RecommendationAnalyzer(data_store)
+
+        # Get latest session analysis
+        latest = rec_analyzer.get_latest_analysis()
+        if not latest:
+            return "", False
+
+        # Get period metrics for context
+        metrics = rec_analyzer.analyze_period(days=7)
+
+        insights_parts = []
+
+        # Latest session summary
+        if latest.compliance_status == "optimal":
+            insights_parts.append(
+                f"📊 Last charge: Optimal timing (score: {latest.timing_score}/100)"
+            )
+        elif latest.compliance_status == "partial":
+            insights_parts.append(
+                f"📊 Last charge: Partial overlap ({latest.timing_score}/100)"
+            )
+        else:
+            insights_parts.append(
+                f"📊 Last charge: Missed window ({latest.timing_score}/100)"
+            )
+
+        # Savings info
+        if latest.savings_captured > 0:
+            insights_parts.append(f"💵 Saved: £{latest.savings_captured:.2f}")
+
+        if latest.savings_missed > 0.20:
+            insights_parts.append(f"📈 Could save: £{latest.savings_missed:.2f} more")
+
+        # Weekly summary if we have data
+        if metrics.sessions_analyzed >= 3:
+            insights_parts.append(
+                f"📅 Week: {metrics.compliance_rate:.0f}% optimal timing"
+            )
+            if metrics.improvement_potential > 1.0:
+                insights_parts.append(
+                    f"💡 Monthly potential: £{metrics.improvement_potential:.2f}"
+                )
+
+        # Top recommendation
+        if metrics.recommendations:
+            top_rec = metrics.recommendations[0]
+            if "Great job" not in top_rec:
+                insights_parts.append(f"💬 Tip: {top_rec[:60]}...")
+
+        # Determine if significant
+        has_significant = (
+            latest.savings_missed > 0.50
+            or metrics.compliance_rate < 50
+            or latest.compliance_status == "suboptimal"
+        )
+
+        insights_text = "\n".join(insights_parts)
+        return insights_text, has_significant
+
+    except Exception as e:
+        logger.warning(f"Failed to get ACIX insights: {e}")
+        return "", False
+
+
+def sync_to_google_calendar(
+    config: Dict[str, Any], analyzer: Analyzer, data_store: DataStore
+) -> bool:
+    """Sync 7-day charging plan to Google Calendar.
+
+    Args:
+        config: Configuration dictionary
+        analyzer: Analyzer instance
+        data_store: DataStore instance
+
+    Returns:
+        True if sync successful, False otherwise
+    """
+    cal_config = config.get("google_calendar", {})
+
+    if not cal_config.get("enabled", False):
+        logger.debug("Google Calendar sync disabled")
+        return True
+
+    if not cal_config.get("sync_daily", True):
+        logger.debug("Daily calendar sync disabled")
+        return True
+
+    try:
+        from modules.google_calendar import GoogleCalendarClient
+
+        credentials_path = cal_config.get(
+            "credentials_path", "config/google_credentials.json"
+        )
+        calendar_id = cal_config.get("calendar_id")
+
+        if not calendar_id:
+            logger.warning("Google Calendar ID not configured")
+            return False
+
+        # Initialize calendar client
+        client = GoogleCalendarClient(credentials_path, calendar_id)
+
+        # Generate 7-day plan
+        planner = MultiDayPlanner(
+            config=config,
+            analyzer=analyzer,
+            data_store=data_store,
+            num_days=7,
+        )
+
+        kwh = config["user"]["typical_charge_kwh"]
+        plan = planner.generate_plan(kwh)
+
+        # Convert days to dict format
+        days_data = []
+        for day in plan.days:
+            days_data.append(
+                {
+                    "date": day.date,
+                    "day_name": day.day_name,
+                    "avg_price": day.avg_price,
+                    "optimal_window": day.optimal_window,
+                    "cost": day.cost,
+                    "rating": day.rating,
+                    "price_source": day.price_source,
+                    "savings_vs_today": day.savings_vs_today,
+                    "avg_carbon": day.avg_carbon,
+                }
+            )
+
+        # Get reminder settings
+        reminders = cal_config.get("reminders", [60, 15])
+
+        # Create events
+        event_ids = client.create_multi_day_events(
+            days=days_data,
+            kwh=kwh,
+            best_day=plan.best_day,
+            reminders=reminders,
+        )
+
+        logger.info(f"📅 Synced {len(event_ids)} events to Google Calendar")
+
+        # Cleanup old events
+        if cal_config.get("delete_past_events", True):
+            from datetime import timedelta
+
+            retention_days = cal_config.get("retention_days", 7)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+            deleted = client.delete_old_events(cutoff)
+            if deleted > 0:
+                logger.info(f"📅 Cleaned up {deleted} old calendar events")
+
+        return True
+
+    except FileNotFoundError as e:
+        logger.warning(f"Google Calendar credentials not found: {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to sync to Google Calendar: {e}")
+        return False
 
 
 def main():
@@ -428,6 +690,9 @@ def main():
         data_store.save_recommendation(recommendation)
         logger.info(f"Recommendation saved ({day_type}, {price_source})")
 
+        # Sync to Google Calendar (if enabled)
+        sync_to_google_calendar(config, analyzer, data_store)
+
         # Check for negative pricing (money-making opportunity!)
         has_negative_pricing = any(slot.price < 0 for slot in price_slots)
         negative_slots = [slot for slot in price_slots if slot.price < 0]
@@ -468,6 +733,9 @@ def main():
             )
             logger.info("Negative pricing alert sent!")
 
+        # Build "better day ahead" hint from agile_predict forecasts
+        better_day_hint = build_better_day_hint(config, window.avg_price)
+
         # Determine if this is worth a notification (exceptional opportunities only)
         is_exceptional = (
             window.rating == OpportunityRating.EXCELLENT  # EXCELLENT rating
@@ -476,18 +744,30 @@ def main():
             or has_negative_pricing  # Already handled above, but included for clarity
         )
 
-        # Always send notification for exceptional opportunities
-        # For normal/poor opportunities, skip to reduce notification spam
-        if is_exceptional or has_negative_pricing:
+        # Also notify for AVERAGE/POOR days when a better day is clearly ahead
+        has_better_day = bool(better_day_hint)
+
+        if is_exceptional or has_negative_pricing or has_better_day:
+            # Get ACIX behavioral insights
+            acix_insights, has_acix_alerts = get_acix_insights(data_store, config)
+            if acix_insights:
+                logger.info(f"📊 ACIX insights: {has_acix_alerts=}")
+
             # Format and send normal notification
             title, message, priority, sound = format_notification(
-                window, config, price_source
+                window,
+                config,
+                price_source,
+                acix_insights=acix_insights,
+                better_day_hint=better_day_hint,
             )
 
-            logger.info(
-                f"Sending notification (priority={priority}, reason: "
-                f"{'negative pricing' if has_negative_pricing else 'exceptional opportunity'})"
+            reason = (
+                "negative pricing"
+                if has_negative_pricing
+                else "exceptional opportunity" if is_exceptional else "better day ahead"
             )
+            logger.info(f"Sending notification (priority={priority}, reason: {reason})")
             success = pushover_client.send_notification(
                 title=title,
                 message=message,
