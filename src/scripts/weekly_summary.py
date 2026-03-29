@@ -383,6 +383,102 @@ def add_weekend_analysis(
     return message
 
 
+def add_acix_insights(
+    message: str, data_store: DataStore, config: Dict[str, Any]
+) -> str:
+    """Add ACIX behavioral insights to weekly summary.
+
+    Uses actual detected charging sessions to provide behavior analysis.
+
+    Args:
+        message: Current message
+        data_store: DataStore instance
+        config: Configuration dictionary
+
+    Returns:
+        Updated message with ACIX insights
+    """
+    acix_config = config.get("acix", {})
+    if not acix_config.get("enabled", False):
+        return message
+
+    try:
+        from modules.recommendation_analyzer import RecommendationAnalyzer
+
+        analyzer = RecommendationAnalyzer(data_store)
+        metrics = analyzer.analyze_period(days=7)
+
+        if metrics.total_sessions == 0:
+            return message
+
+        message += "\n<b>🧠 ACIX Charging Intelligence:</b>\n"
+        message += f"  Sessions detected: {metrics.total_sessions}\n"
+
+        # Timing analysis
+        if metrics.sessions_analyzed > 0:
+            message += f"  Timing score: {metrics.avg_timing_score:.0f}/100\n"
+
+            # Compliance breakdown
+            if metrics.optimal_count > 0:
+                message += f"  ✅ Optimal timing: {metrics.optimal_count}\n"
+            if metrics.partial_count > 0:
+                message += f"  🔶 Partial overlap: {metrics.partial_count}\n"
+            if metrics.suboptimal_count > 0:
+                message += f"  ❌ Missed window: {metrics.suboptimal_count}\n"
+
+            # Compliance rate
+            message += f"  Compliance rate: {metrics.compliance_rate:.0f}%\n"
+
+        # Savings analysis
+        message += "\n<b>💵 Savings Analysis:</b>\n"
+        message += f"  Captured: £{metrics.total_savings_captured:.2f}\n"
+
+        if metrics.total_savings_missed > 0.10:
+            message += f"  Missed: £{metrics.total_savings_missed:.2f}\n"
+
+        if metrics.improvement_potential > 1.0:
+            message += f"  Monthly potential: £{metrics.improvement_potential:.2f}\n"
+
+        # Patterns detected
+        patterns = metrics.patterns
+        if patterns:
+            message += "\n<b>📊 Detected Patterns:</b>\n"
+
+            avg_hour = patterns.get("avg_start_hour")
+            if avg_hour is not None:
+                hour_str = f"{int(avg_hour)}:{int((avg_hour % 1) * 60):02d}"
+                message += f"  Avg plug-in time: {hour_str}\n"
+
+            if patterns.get("late_start_ratio", 0) > 0.3:
+                late_pct = int(patterns["late_start_ratio"] * 100)
+                message += f"  ⚠️ Late starts: {late_pct}% of sessions\n"
+
+            if patterns.get("consistent_timing", False):
+                message += "  ✅ Consistent charging schedule\n"
+            elif patterns.get("start_time_variance", 0) > 6:
+                message += "  📈 Variable charging times\n"
+
+            if patterns.get("avg_kwh"):
+                message += f"  Avg charge: {patterns['avg_kwh']:.1f} kWh\n"
+
+        # Top recommendation
+        if metrics.recommendations:
+            message += "\n<b>💡 ACIX Recommendation:</b>\n"
+            # Get most actionable recommendation (not "Great job")
+            for rec in metrics.recommendations:
+                if "Great job" not in rec and "Keep monitoring" not in rec:
+                    message += f"  {rec}\n"
+                    break
+            else:
+                # All recommendations are positive
+                message += f"  {metrics.recommendations[0]}\n"
+
+    except Exception as e:
+        logger.warning(f"Could not add ACIX insights: {e}")
+
+    return message
+
+
 def add_monthly_cost_section(message: str, config: Dict[str, Any]) -> str:
     """Add month-to-date cost tracking to weekly summary.
 
@@ -429,6 +525,72 @@ def add_monthly_cost_section(message: str, config: Dict[str, Any]) -> str:
     return message
 
 
+def add_week_ahead_section(message: str, config: Dict[str, Any]) -> str:
+    """Add best forecast days for the coming week to the summary.
+
+    Fetches agile_predict day summaries for the next 7 days and ranks them
+    by average predicted price, highlighting the best charging days ahead.
+
+    Args:
+        message: Current message
+        config: Configuration dictionary
+
+    Returns:
+        Updated message with week-ahead forecast section
+    """
+    try:
+        from modules.agile_predict_api import AgilePredict
+
+        region = config["user"]["region"]
+        client = AgilePredict()
+        summaries = client.get_day_summary(region, days=7)
+
+        if not summaries:
+            return message
+
+        # Skip today (index 0) — we only want future days
+        future = summaries[1:]
+        if not future:
+            return message
+
+        # Rank by avg predicted price (cheapest first)
+        ranked = sorted(future, key=lambda s: s["avg_pred"])
+
+        message += "\n<b>📅 Best days to charge next week:</b>\n"
+
+        from datetime import date as date_type
+
+        today = date_type.today()
+
+        for entry in ranked[:4]:  # Show top 4 days
+            try:
+                entry_date = date_type.fromisoformat(entry["date"])
+                delta = (entry_date - today).days
+                if delta == 1:
+                    label = "Tomorrow"
+                else:
+                    label = entry_date.strftime("%A")
+            except ValueError:
+                label = entry["date"]
+
+            price = entry["avg_pred"]
+            confidence = entry["confidence"]
+
+            # Star the cheapest day
+            star = " ⭐" if entry == ranked[0] else ""
+            message += f"  {label}: {price:.1f}p/kWh ({confidence}){star}\n"
+
+        logger.info(
+            f"Week ahead section added: best day is "
+            f"{ranked[0]['date']} at {ranked[0]['avg_pred']:.1f}p/kWh"
+        )
+
+    except Exception as e:
+        logger.debug(f"Could not add week-ahead section: {e}")
+
+    return message
+
+
 def main():
     """Main execution function"""
     logger.info("Starting weekly summary script")
@@ -466,11 +628,17 @@ def main():
         # Add weekend/weekday analysis (Phase 2 Feature #8)
         message = add_weekend_analysis(message, recommendations, analysis)
 
+        # Add ACIX behavioral insights (Phase 3 Task 11)
+        message = add_acix_insights(message, data_store, config)
+
         # Add forecast accuracy (Phase 1 Feature #1)
         message = add_forecast_accuracy(message, recommendations)
 
         # Add month-to-date cost tracking (Phase 2 Feature #7)
         message = add_monthly_cost_section(message, config)
+
+        # Add agile_predict week-ahead forecast
+        message = add_week_ahead_section(message, config)
 
         # Send notification
         logger.info("Sending weekly summary notification")
