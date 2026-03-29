@@ -8,7 +8,7 @@ optimal charging recommendations. Runs daily at 16:00 via launchd.
 import sys
 import os
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date
 from typing import Dict, Any, List
 import logging
 
@@ -29,6 +29,7 @@ from modules.analyzer import (
     WindowStatus,
 )
 from modules.multi_day_planner import MultiDayPlanner
+from modules.agile_predict_api import AgilePredict
 import yaml
 from dotenv import load_dotenv
 
@@ -220,36 +221,42 @@ def fetch_forecast_prices(region: str) -> tuple[list[PriceSlot], str]:
         raise RuntimeError("Forecast API failed") from e
 
 
-def build_better_day_hint(config: Dict[str, Any], today_avg_price: float) -> str:
-    """Return a "better day ahead" hint string if a future day is cheaper.
-
-    Fetches agile_predict day summaries and compares against today's average
-    price. Returns a formatted HTML string if any of the next 6 days look
-    meaningfully cheaper (>15% saving), otherwise returns empty string.
+def _format_day_label(date_str: str) -> str:
+    """Return a human-readable label for a forecast date.
 
     Args:
-        config: Configuration dictionary
-        today_avg_price: Today's optimal window average price in pence/kWh
+        date_str: ISO date string e.g. "2026-03-30"
 
     Returns:
-        HTML hint string, or "" if no better day found or fetch fails
+        "Tomorrow" for next day, weekday name otherwise (e.g. "Wednesday")
     """
-    from modules.agile_predict_api import AgilePredict
-
-    region = config["user"]["region"]
-    threshold_pct = 15.0  # % cheaper to be worth mentioning
-
     try:
-        client = AgilePredict()
-        summaries = client.get_day_summary(region, days=7)
-    except Exception as e:
-        logger.debug(f"agile_predict day summary fetch failed: {e}")
-        return ""
+        entry_date = date.fromisoformat(date_str)
+        delta = (entry_date - date.today()).days
+        if delta == 1:
+            return "Tomorrow"
+        return entry_date.strftime("%A")
+    except ValueError:
+        return "a future day"
+
+
+def build_better_day_hint(
+    today_avg_price: float, summaries: List[Dict[str, Any]]
+) -> str:
+    """Return a "better day ahead" hint string if a future day is cheaper.
+
+    Args:
+        today_avg_price: Today's optimal window average price in pence/kWh
+        summaries: Pre-fetched agile_predict day summaries (from get_day_summary)
+
+    Returns:
+        HTML hint string, or "" if no better day found
+    """
+    threshold_pct = 15.0  # % cheaper to be worth mentioning
 
     if not summaries:
         return ""
 
-    # Skip today (first entry) — find best future day
     future = summaries[1:] if len(summaries) > 1 else []
     if not future:
         return ""
@@ -260,20 +267,7 @@ def build_better_day_hint(config: Dict[str, Any], today_avg_price: float) -> str
     if saving_pct < threshold_pct:
         return ""
 
-    # Format the day name (Tomorrow / Day N)
-    from datetime import date as date_type
-
-    today = date_type.today()
-    try:
-        best_date = date_type.fromisoformat(best["date"])
-        delta = (best_date - today).days
-        if delta == 1:
-            day_label = "Tomorrow"
-        else:
-            day_label = best_date.strftime("%A")  # e.g. "Wednesday"
-    except ValueError:
-        day_label = "a future day"
-
+    day_label = _format_day_label(best["date"])
     confidence = best["confidence"]
     hint = (
         f"\n<b>💡 Better day ahead:</b> {day_label} looks cheaper — "
@@ -733,8 +727,12 @@ def main():
             )
             logger.info("Negative pricing alert sent!")
 
+        # Fetch agile_predict summaries once — reused by hint and calendar sync
+        region = config["user"]["region"]
+        agile_summaries = AgilePredict().get_day_summary(region, days=7)
+
         # Build "better day ahead" hint from agile_predict forecasts
-        better_day_hint = build_better_day_hint(config, window.avg_price)
+        better_day_hint = build_better_day_hint(window.avg_price, agile_summaries)
 
         # Determine if this is worth a notification (exceptional opportunities only)
         is_exceptional = (

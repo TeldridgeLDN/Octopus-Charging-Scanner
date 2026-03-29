@@ -16,6 +16,15 @@ from .octopus_api import BaseAPIClient
 
 logger = logging.getLogger(__name__)
 
+# Confidence labels derived from p10/p90 band width (pence/kWh)
+CONFIDENCE_HIGH = "high confidence"
+CONFIDENCE_MODERATE = "moderate confidence"
+CONFIDENCE_UNCERTAIN = "uncertain forecast"
+
+# Band width thresholds for confidence classification
+_BAND_HIGH = 5.0
+_BAND_MODERATE = 10.0
+
 
 class AgilePredict(BaseAPIClient):
     """Fetch ML-based Agile price forecasts from prices.fly.dev.
@@ -128,27 +137,35 @@ class AgilePredict(BaseAPIClient):
 
         return slots
 
+    def _band_to_confidence(self, low: Any, high: Any) -> str:
+        """Map p10/p90 band width to a confidence label.
+
+        Args:
+            low: p10 bound (agile_low), or None
+            high: p90 bound (agile_high), or None
+
+        Returns:
+            One of CONFIDENCE_HIGH, CONFIDENCE_MODERATE, CONFIDENCE_UNCERTAIN
+        """
+        if low is None or high is None:
+            return CONFIDENCE_UNCERTAIN
+        band = high - low
+        if band < _BAND_HIGH:
+            return CONFIDENCE_HIGH
+        if band < _BAND_MODERATE:
+            return CONFIDENCE_MODERATE
+        return CONFIDENCE_UNCERTAIN
+
     def confidence_label(self, slot: Dict[str, Any]) -> str:
-        """Derive a human-readable confidence label from the p10/p90 band.
+        """Derive a human-readable confidence label from a forecast slot's p10/p90 band.
 
         Args:
             slot: A forecast slot dict from get_forecasts()
 
         Returns:
-            "high confidence" | "moderate confidence" | "uncertain forecast"
+            One of CONFIDENCE_HIGH, CONFIDENCE_MODERATE, CONFIDENCE_UNCERTAIN
         """
-        low = slot.get("agile_low")
-        high = slot.get("agile_high")
-
-        if low is None or high is None:
-            return "uncertain forecast"
-
-        band = high - low
-        if band < 5.0:
-            return "high confidence"
-        if band < 10.0:
-            return "moderate confidence"
-        return "uncertain forecast"
+        return self._band_to_confidence(slot.get("agile_low"), slot.get("agile_high"))
 
     def is_available(self, region: str = "H") -> bool:
         """Check if the agile_predict service is reachable.
@@ -205,18 +222,7 @@ class AgilePredict(BaseAPIClient):
 
             avg_low = sum(lows) / len(lows) if lows else None
             avg_high = sum(highs) / len(highs) if highs else None
-
-            # Confidence from average band width
-            if avg_low is not None and avg_high is not None:
-                band = avg_high - avg_low
-                if band < 5.0:
-                    confidence = "high confidence"
-                elif band < 10.0:
-                    confidence = "moderate confidence"
-                else:
-                    confidence = "uncertain forecast"
-            else:
-                confidence = "uncertain forecast"
+            confidence = self._band_to_confidence(avg_low, avg_high)
 
             summaries.append(
                 {
