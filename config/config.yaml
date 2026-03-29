@@ -36,6 +36,14 @@ apis:
     product: "AGILE-24-10-01"
     tariff_code: "E-1R-AGILE-24-10-01-H"
 
+  agile_predict:
+    base_url: "https://prices.fly.dev"
+    default_region: "H"               # H = Southern England / London
+    days: 14
+    high_low: true
+    confidence_narrow_threshold: 5.0  # p/kWh band width = "high confidence"
+    confidence_wide_threshold: 10.0   # p/kWh band width = "uncertain"
+
   forecast:
     url: "https://energy.guylipman.com/forecasts"
     update_interval_hours: 6
@@ -67,3 +75,45 @@ forecast_evolution:
   significant_change_threshold: 10  # % change to trigger alert
   retention_days: 30
   notify_on_change: true
+
+# ACIX - Adaptive Charging Intelligence Extension
+# Detects EV charging sessions from consumption data and provides behavioral insights
+acix:
+  enabled: true
+
+  # EV Detection Settings
+  ev_power_threshold_kw: 2.3    # Minimum power draw to consider as EV charging
+  min_charging_intervals: 2      # Minimum consecutive intervals (30min each) to detect session
+
+  # Arrival window estimation (for plug-in delay calculation)
+  arrival_window:
+    start: "18:00"               # Estimated earliest arrival time
+    end: "20:00"                 # Estimated latest arrival time
+
+  # Detection confidence
+  detection_confidence_threshold: 60  # Minimum confidence score (0-100) to log session
+
+  # Data retention
+  usage_retention_days: 30       # How long to keep raw consumption data
+  events_retention_days: 90      # How long to keep detected events
+  sessions_retention_days: 90    # How long to keep aggregated sessions
+
+# Google Calendar integration
+# Publishes charging windows to a shared calendar for household visibility
+google_calendar:
+  enabled: true
+  credentials_path: "config/google_credentials.json"
+  calendar_id: "5e352d691fec771a9964a7efdea58f1e074b3c68c0d1f594e7663a125bf6bb54@group.calendar.google.com"
+
+  # What to sync
+  sync_daily: true          # Sync on daily notification (4 PM)
+  show_all_days: true       # Show all 7 days of charging windows
+
+  # Event settings
+  reminders:
+    - 60   # 1 hour before window starts
+    - 15   # 15 minutes before window starts
+
+  # Cleanup
+  delete_past_events: true  # Auto-delete old events
+  retention_days: 7         # Keep events for 7 days after they pass
