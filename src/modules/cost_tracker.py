@@ -268,6 +268,157 @@ class CostTracker:
         # Return most recent N months
         return summaries[:months]
 
+    def aggregate_month_from_acix(self, year: int, month: int) -> Dict[str, Any]:
+        """Aggregate costs using ACIX detected sessions.
+
+        Uses actual detected charging sessions from ACIX for accurate tracking.
+
+        Args:
+            year: Year to aggregate
+            month: Month to aggregate (1-12)
+
+        Returns:
+            Dictionary with monthly cost metrics based on ACIX data
+        """
+        logger.info(f"Aggregating ACIX costs for {year}-{month:02d}")
+
+        # Get all sessions
+        all_sessions = self.data_store.get_sessions(days=365)
+
+        # Filter to specific month
+        sessions = [
+            s for s in all_sessions if self._is_in_month(s.get("date"), year, month)
+        ]
+
+        if not sessions:
+            return {
+                "year": year,
+                "month": month,
+                "source": "acix",
+                "total_kwh": 0.0,
+                "estimated_cost": 0.0,
+                "num_sessions": 0,
+                "avg_kwh_per_session": 0.0,
+                "total_duration_hours": 0.0,
+                "avg_confidence": 0.0,
+            }
+
+        # Calculate metrics from detected sessions
+        total_kwh = sum(s.get("total_kwh", 0) for s in sessions)
+        total_duration = sum(s.get("duration_hours", 0) for s in sessions)
+        avg_confidence = sum(s.get("confidence", 0) for s in sessions) / len(sessions)
+
+        # Get recommendations to estimate costs
+        all_recommendations = self.data_store.get_recommendations(days=365)
+        rec_by_date = {rec.get("date"): rec for rec in all_recommendations}
+
+        # Calculate estimated cost based on recommendations
+        estimated_cost = 0.0
+        sessions_with_cost = 0
+        savings_captured = 0.0
+
+        for session in sessions:
+            session_date = session.get("date")
+            session_kwh = session.get("total_kwh", 0)
+
+            if session_date in rec_by_date:
+                rec = rec_by_date[session_date]
+                avg_price = rec.get("avg_price", 15.0)  # pence/kWh
+                # Calculate cost for actual kWh charged
+                cost = (session_kwh * avg_price) / 100
+                estimated_cost += cost
+                sessions_with_cost += 1
+
+                # Calculate savings vs baseline (22p evening rate)
+                baseline_cost = (session_kwh * 22.0) / 100
+                savings_captured += max(0, baseline_cost - cost)
+            else:
+                # No recommendation, estimate at 15p/kWh
+                estimated_cost += (session_kwh * 15.0) / 100
+
+        return {
+            "year": year,
+            "month": month,
+            "source": "acix",
+            "total_kwh": round(total_kwh, 2),
+            "estimated_cost": round(estimated_cost, 2),
+            "num_sessions": len(sessions),
+            "avg_kwh_per_session": round(total_kwh / len(sessions), 2),
+            "total_duration_hours": round(total_duration, 1),
+            "avg_confidence": round(avg_confidence, 1),
+            "sessions_with_recommendations": sessions_with_cost,
+            "savings_captured": round(savings_captured, 2),
+        }
+
+    def get_acix_monthly_summary(self, year: int, month: int) -> Dict[str, Any]:
+        """Get complete monthly summary using ACIX data.
+
+        Combines ACIX session data with recommendation analyzer insights.
+
+        Args:
+            year: Year to summarize
+            month: Month to summarize (1-12)
+
+        Returns:
+            Complete monthly summary with ACIX insights
+        """
+        logger.info(f"Generating ACIX monthly summary for {year}-{month:02d}")
+
+        # Get ACIX aggregated metrics
+        metrics = self.aggregate_month_from_acix(year, month)
+
+        if metrics["num_sessions"] == 0:
+            return {
+                **metrics,
+                "baseline_comparisons": {
+                    "standard_savings": 0.0,
+                    "peak_savings": 0.0,
+                },
+                "behavioral_insights": None,
+            }
+
+        # Calculate baseline comparisons
+        baselines = self.calculate_baseline_comparisons(
+            metrics["estimated_cost"],
+            metrics["num_sessions"],
+            metrics["avg_kwh_per_session"],
+        )
+
+        # Get behavioral insights from ACIX
+        behavioral_insights = None
+        try:
+            from .recommendation_analyzer import RecommendationAnalyzer
+
+            analyzer = RecommendationAnalyzer(self.data_store)
+
+            # Get metrics for the specific month (approximate with 30 days)
+            all_metrics = analyzer.analyze_period(days=365)
+
+            # Extract month-specific insights if we have enough data
+            if all_metrics.sessions_analyzed > 0:
+                behavioral_insights = {
+                    "compliance_rate": all_metrics.compliance_rate,
+                    "avg_timing_score": all_metrics.avg_timing_score,
+                    "patterns": all_metrics.patterns,
+                    "recommendations": all_metrics.recommendations[:2],
+                }
+        except Exception as e:
+            logger.warning(f"Could not get behavioral insights: {e}")
+
+        summary = {
+            **metrics,
+            "baseline_comparisons": baselines,
+            "behavioral_insights": behavioral_insights,
+            "generated_at": datetime.now().isoformat(),
+        }
+
+        logger.info(
+            f"ACIX Monthly summary: {metrics['num_sessions']} sessions, "
+            f"{metrics['total_kwh']:.1f} kWh, £{metrics['estimated_cost']:.2f} spent"
+        )
+
+        return summary
+
     def get_yearly_projection(self, kwh_per_charge: float = 30.0) -> Dict[str, Any]:
         """Project annual savings based on current year's data.
 

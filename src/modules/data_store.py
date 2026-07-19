@@ -17,10 +17,14 @@ logger = logging.getLogger(__name__)
 class DataStore:
     """JSON-based data persistence with atomic writes and retention policies.
 
-    Manages three types of data:
+    Manages data types:
     - Forecast history: 7-day rolling forecasts
     - Daily recommendations: 30-day archive
     - User actions: Manual charge logs
+    - ACIX usage data: Raw consumption data
+    - ACIX events: Detected EV charging events
+    - ACIX sessions: Aggregated charging sessions
+    - ACIX metrics: Behavioral metrics
     """
 
     DATA_DIR = Path("data")
@@ -29,10 +33,21 @@ class DataStore:
     USER_ACTIONS_FILE = DATA_DIR / "user_actions.json"
     EVOLUTION_FILE = DATA_DIR / "forecast_evolution.json"
 
+    # ACIX data files
+    USAGE_FILE = DATA_DIR / "usage_raw.json"
+    EVENTS_FILE = DATA_DIR / "events.json"
+    SESSIONS_FILE = DATA_DIR / "sessions.json"
+    BEHAVIOUR_METRICS_FILE = DATA_DIR / "behaviour_metrics.json"
+
     FORECAST_RETENTION_DAYS = 7
     RECOMMENDATION_RETENTION_DAYS = 30
     USER_ACTION_RETENTION_DAYS = 90
     EVOLUTION_RETENTION_DAYS = 30
+
+    # ACIX retention defaults (can be overridden by config)
+    USAGE_RETENTION_DAYS = 30
+    EVENTS_RETENTION_DAYS = 90
+    SESSIONS_RETENTION_DAYS = 90
 
     def __init__(self, data_dir: Optional[Path] = None):
         """Initialize data store.
@@ -46,6 +61,11 @@ class DataStore:
             self.RECOMMENDATIONS_FILE = self.DATA_DIR / "daily_recommendations.json"
             self.USER_ACTIONS_FILE = self.DATA_DIR / "user_actions.json"
             self.EVOLUTION_FILE = self.DATA_DIR / "forecast_evolution.json"
+            # ACIX files
+            self.USAGE_FILE = self.DATA_DIR / "usage_raw.json"
+            self.EVENTS_FILE = self.DATA_DIR / "events.json"
+            self.SESSIONS_FILE = self.DATA_DIR / "sessions.json"
+            self.BEHAVIOUR_METRICS_FILE = self.DATA_DIR / "behaviour_metrics.json"
 
         self.DATA_DIR.mkdir(parents=True, exist_ok=True)
         logger.info(f"Data store initialized at {self.DATA_DIR}")
@@ -376,3 +396,232 @@ class DataStore:
             if temp_path.exists():
                 temp_path.unlink()
             raise
+
+    # ========== ACIX Usage Data Methods ==========
+
+    def save_usage(self, usage_records: List[Dict[str, Any]]) -> int:
+        """Save consumption records, merging with existing data.
+
+        Deduplicates by interval_start timestamp.
+
+        Args:
+            usage_records: List of consumption records with interval_start
+
+        Returns:
+            Number of new records added
+        """
+        existing = self._load_json(self.USAGE_FILE, default=[])
+
+        # Create set of existing timestamps for deduplication
+        existing_timestamps = {r["interval_start"] for r in existing}
+
+        # Add only new records
+        new_records = [
+            r for r in usage_records if r["interval_start"] not in existing_timestamps
+        ]
+
+        if new_records:
+            combined = existing + new_records
+            # Sort by timestamp
+            combined.sort(key=lambda x: x["interval_start"])
+            self._save_json(self.USAGE_FILE, combined)
+            logger.info(f"Added {len(new_records)} new usage records")
+
+        return len(new_records)
+
+    def get_usage(
+        self, start: Optional[datetime] = None, end: Optional[datetime] = None
+    ) -> List[Dict[str, Any]]:
+        """Get usage records within a time range.
+
+        Args:
+            start: Start datetime (default: 48 hours ago)
+            end: End datetime (default: now)
+
+        Returns:
+            List of usage records in the range
+        """
+        usage = self._load_json(self.USAGE_FILE, default=[])
+
+        if not start and not end:
+            return usage
+
+        if end is None:
+            end = datetime.now()
+        if start is None:
+            start = end - timedelta(hours=48)
+
+        # Filter by time range
+        filtered = []
+        for record in usage:
+            try:
+                record_time = datetime.fromisoformat(
+                    record["interval_start"].replace("Z", "+00:00")
+                )
+                # Make naive if comparing with naive datetime
+                if start.tzinfo is None:
+                    record_time = record_time.replace(tzinfo=None)
+                if start <= record_time <= end:
+                    filtered.append(record)
+            except (ValueError, KeyError):
+                continue
+
+        logger.info(f"Retrieved {len(filtered)} usage records")
+        return filtered
+
+    def get_latest_usage_timestamp(self) -> Optional[datetime]:
+        """Get the timestamp of the most recent usage record.
+
+        Returns:
+            Datetime of latest record or None if no data
+        """
+        usage = self._load_json(self.USAGE_FILE, default=[])
+
+        if not usage:
+            return None
+
+        try:
+            latest = max(usage, key=lambda x: x["interval_start"])
+            return datetime.fromisoformat(
+                latest["interval_start"].replace("Z", "+00:00")
+            )
+        except (ValueError, KeyError):
+            return None
+
+    def cleanup_usage(self, retention_days: int = 30) -> int:
+        """Remove usage records older than retention period.
+
+        Args:
+            retention_days: Days to retain data
+
+        Returns:
+            Number of records removed
+        """
+        usage = self._load_json(self.USAGE_FILE, default=[])
+        if not usage:
+            return 0
+
+        cutoff_iso = (datetime.now() - timedelta(days=retention_days)).isoformat()
+
+        original_count = len(usage)
+        usage = [r for r in usage if r["interval_start"] >= cutoff_iso]
+
+        removed = original_count - len(usage)
+        if removed > 0:
+            self._save_json(self.USAGE_FILE, usage)
+            logger.info(f"Removed {removed} old usage records")
+
+        return removed
+
+    # ========== ACIX Events Methods ==========
+
+    def save_event(self, event: Dict[str, Any]) -> None:
+        """Save a detected EV charging event.
+
+        Args:
+            event: Event data with timestamp, type, and details
+        """
+        events = self._load_json(self.EVENTS_FILE, default=[])
+
+        event_entry = {
+            **event,
+            "saved_at": datetime.now().isoformat(),
+        }
+
+        events.append(event_entry)
+        self._save_json(self.EVENTS_FILE, events)
+        logger.info(f"Saved event: {event.get('event', 'unknown')}")
+
+    def get_events(self, days: int = 90) -> List[Dict[str, Any]]:
+        """Get events from the last N days.
+
+        Args:
+            days: Number of days to retrieve
+
+        Returns:
+            List of events
+        """
+        events = self._load_json(self.EVENTS_FILE, default=[])
+
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        recent = [e for e in events if e.get("saved_at", "") >= cutoff]
+
+        logger.info(f"Retrieved {len(recent)} events from last {days} days")
+        return recent
+
+    # ========== ACIX Sessions Methods ==========
+
+    def save_session(self, session: Dict[str, Any]) -> None:
+        """Save an aggregated charging session.
+
+        Args:
+            session: Session data with date, times, and metrics
+        """
+        sessions = self._load_json(self.SESSIONS_FILE, default=[])
+
+        session_entry = {
+            **session,
+            "saved_at": datetime.now().isoformat(),
+        }
+
+        sessions.append(session_entry)
+        self._save_json(self.SESSIONS_FILE, sessions)
+        logger.info(f"Saved session for {session.get('date', 'unknown date')}")
+
+    def get_sessions(self, days: int = 90) -> List[Dict[str, Any]]:
+        """Get sessions from the last N days.
+
+        Args:
+            days: Number of days to retrieve
+
+        Returns:
+            List of sessions
+        """
+        sessions = self._load_json(self.SESSIONS_FILE, default=[])
+
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        recent = [s for s in sessions if s.get("saved_at", "") >= cutoff]
+
+        logger.info(f"Retrieved {len(recent)} sessions from last {days} days")
+        return recent
+
+    def get_session_by_date(self, date: str) -> Optional[Dict[str, Any]]:
+        """Get session for a specific date.
+
+        Args:
+            date: Date string in ISO format (YYYY-MM-DD)
+
+        Returns:
+            Session for the date or None if not found
+        """
+        sessions = self._load_json(self.SESSIONS_FILE, default=[])
+
+        for session in reversed(sessions):
+            if session.get("date") == date:
+                return session
+
+        return None
+
+    # ========== ACIX Behaviour Metrics Methods ==========
+
+    def save_behaviour_metrics(self, metrics: Dict[str, Any]) -> None:
+        """Save behaviour metrics snapshot.
+
+        Args:
+            metrics: Metrics data with efficiency scores, patterns, etc.
+        """
+        metrics_entry = {
+            **metrics,
+            "saved_at": datetime.now().isoformat(),
+        }
+
+        self._save_json(self.BEHAVIOUR_METRICS_FILE, metrics_entry)
+        logger.info("Saved behaviour metrics")
+
+    def get_behaviour_metrics(self) -> Optional[Dict[str, Any]]:
+        """Get the latest behaviour metrics.
+
+        Returns:
+            Latest metrics or None if not available
+        """
+        return self._load_json(self.BEHAVIOUR_METRICS_FILE, default=None)

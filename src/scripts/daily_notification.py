@@ -8,7 +8,7 @@ optimal charging recommendations. Runs daily at 16:00 via launchd.
 import sys
 import os
 from pathlib import Path
-from datetime import datetime, timezone, timedelta, date
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List
 import logging
 
@@ -30,6 +30,11 @@ from modules.analyzer import (
 )
 from modules.multi_day_planner import MultiDayPlanner
 from modules.agile_predict_api import AgilePredict
+from modules.time_of_day import (
+    part_of_day_phrase,
+    format_day_label,
+    LONDON_TZ,
+)
 import yaml
 from dotenv import load_dotenv
 
@@ -221,33 +226,27 @@ def fetch_forecast_prices(region: str) -> tuple[list[PriceSlot], str]:
         raise RuntimeError("Forecast API failed") from e
 
 
-def _format_day_label(date_str: str) -> str:
-    """Return a human-readable label for a forecast date.
-
-    Args:
-        date_str: ISO date string e.g. "2026-03-30"
-
-    Returns:
-        "Tomorrow" for next day, weekday name otherwise (e.g. "Wednesday")
-    """
-    try:
-        entry_date = date.fromisoformat(date_str)
-        delta = (entry_date - date.today()).days
-        if delta == 1:
-            return "Tomorrow"
-        return entry_date.strftime("%A")
-    except ValueError:
-        return "a future day"
-
-
 def build_better_day_hint(
-    today_avg_price: float, summaries: List[Dict[str, Any]]
+    today_avg_price: float,
+    summaries: List[Dict[str, Any]],
+    client: AgilePredict = None,
+    region: str = "H",
+    raw_slots: List[Dict[str, Any]] = None,
 ) -> str:
     """Return a "better day ahead" hint string if a future day is cheaper.
+
+    Gating is unchanged: a future day only qualifies if its *day-average*
+    predicted price is at least threshold_pct cheaper than today. When it
+    qualifies, the hint is enriched with the cheapest 3-hour block on that day
+    (via get_cheapest_window); if that lookup fails it falls back to the
+    original day-average wording (never returns "" once gated in).
 
     Args:
         today_avg_price: Today's optimal window average price in pence/kWh
         summaries: Pre-fetched agile_predict day summaries (from get_day_summary)
+        client: AgilePredict client for the cheapest-window lookup (optional)
+        region: DNO region code passed to get_cheapest_window
+        raw_slots: Shared pre-fetched forecast slots (from get_forecasts)
 
     Returns:
         HTML hint string, or "" if no better day found
@@ -267,13 +266,32 @@ def build_better_day_hint(
     if saving_pct < threshold_pct:
         return ""
 
-    day_label = _format_day_label(best["date"])
+    day_label = format_day_label(best["date"])
     confidence = best["confidence"]
-    hint = (
-        f"\n<b>💡 Better day ahead:</b> {day_label} looks cheaper — "
-        f"{best['avg_pred']:.1f}p/kWh vs {today_avg_price:.1f}p today "
-        f"({saving_pct:.0f}% less, {confidence})\n"
-    )
+
+    # Enrich with the cheapest 3h block on that day, if we can find one
+    cheap = None
+    if client is not None:
+        cheap = client.get_cheapest_window(
+            region, target_date=best["date"], block_hours=3.0, slots=raw_slots
+        )
+
+    if cheap is not None:
+        phrase = part_of_day_phrase(cheap["start"], day_label)
+        local_start_time = cheap["start"].astimezone(LONDON_TZ).strftime("%-I:%M %p")
+        hint = (
+            f"\n<b>💡 Better day ahead:</b> {phrase} looks cheapest — "
+            f"~{cheap['avg_price']:.1f}p/kWh from {local_start_time} "
+            f"(vs {today_avg_price:.1f}p today, {saving_pct:.0f}% less, "
+            f"{confidence})\n"
+        )
+    else:
+        hint = (
+            f"\n<b>💡 Better day ahead:</b> {day_label} looks cheaper — "
+            f"{best['avg_pred']:.1f}p/kWh vs {today_avg_price:.1f}p today "
+            f"({saving_pct:.0f}% less, {confidence})\n"
+        )
+
     logger.info(
         f"Better day hint: {day_label} at {best['avg_pred']:.1f}p "
         f"({saving_pct:.0f}% cheaper, {confidence})"
@@ -312,6 +330,9 @@ def format_notification(
     time_until_start = window.time_until_start(current_time)
     time_until_end = window.time_until_end(current_time)
 
+    # Part-of-day phrase for this window's start (used in title + action)
+    pod = part_of_day_phrase(window.start)
+
     # Check for negative pricing (SPECIAL ALERT!)
     if window.has_negative_pricing():
         priority = 2  # Emergency priority for negative pricing!
@@ -323,7 +344,7 @@ def format_notification(
         priority = 1  # High
         sound = config["apis"]["pushover"]["sounds"]["excellent"]
         emoji = "🔋⚡"
-        action = "Definitely charge tonight!"
+        action = f"Definitely charge {pod}!"
     elif rating == OpportunityRating.GOOD:
         priority = 0  # Normal
         sound = config["apis"]["pushover"]["sounds"]["good"]
@@ -341,8 +362,9 @@ def format_notification(
         action = "Wait for better prices"
 
     # Format time window (12-hour with AM/PM for clarity)
-    start_time = window.start.strftime("%I:%M %p")
-    end_time = window.end.strftime("%I:%M %p")
+    # Convert UTC -> Europe/London before formatting (fixes BST off-by-one)
+    start_time = window.start.astimezone(LONDON_TZ).strftime("%I:%M %p")
+    end_time = window.end.astimezone(LONDON_TZ).strftime("%I:%M %p")
 
     # Add window status context to action
     if window_status == WindowStatus.ACTIVE:
@@ -371,7 +393,8 @@ def format_notification(
         message += "Charge as much as possible!\n"
     else:
         title = (
-            f"{status_prefix}EV Optimizer: {emoji} Tonight: {rating.value} opportunity"
+            f"{status_prefix}EV Optimizer: {emoji} "
+            f"{pod.capitalize()}: {rating.value} opportunity"
         )
 
         message = f"<b>⚡ Best window:</b> {start_time} - {end_time}\n"
@@ -730,12 +753,20 @@ def main():
             )
             logger.info("Negative pricing alert sent!")
 
-        # Fetch agile_predict summaries once — reused by hint and calendar sync
+        # Fetch agile_predict forecasts once — shared by summaries + cheapest window
         region = config["user"]["region"]
-        agile_summaries = AgilePredict().get_day_summary(region, days=7)
+        client = AgilePredict()
+        raw_slots = client.get_forecasts(region, days=7)
+        agile_summaries = client.get_day_summary(region, slots=raw_slots)
 
         # Build "better day ahead" hint from agile_predict forecasts
-        better_day_hint = build_better_day_hint(window.avg_price, agile_summaries)
+        better_day_hint = build_better_day_hint(
+            window.avg_price,
+            agile_summaries,
+            client=client,
+            region=region,
+            raw_slots=raw_slots,
+        )
 
         # Determine if this is worth a notification (exceptional opportunities only)
         is_exceptional = (

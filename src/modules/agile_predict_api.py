@@ -8,8 +8,8 @@ confidence intervals.
 GitHub: https://github.com/fboundy/agile_predict
 """
 
-from typing import Dict, List, Any
-from datetime import datetime
+from typing import Dict, List, Any, Optional
+from datetime import datetime, date, timedelta
 import logging
 
 from .octopus_api import BaseAPIClient
@@ -178,7 +178,12 @@ class AgilePredict(BaseAPIClient):
         """
         return len(self.get_forecasts(region, days=1)) > 0
 
-    def get_day_summary(self, region: str = "H", days: int = 7) -> List[Dict[str, Any]]:
+    def get_day_summary(
+        self,
+        region: str = "H",
+        days: int = 7,
+        slots: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
         """Return one summary entry per day: min/avg/max predicted price.
 
         Useful for weekly summary "best days ahead" section without needing
@@ -187,6 +192,9 @@ class AgilePredict(BaseAPIClient):
         Args:
             region: DNO region code
             days: Number of days to summarise
+            slots: Optional pre-fetched forecast slots (from get_forecasts).
+                If None, fetches fresh — pass shared slots to avoid a second
+                API call when combining with get_cheapest_window.
 
         Returns:
             List of daily summaries ordered by date:
@@ -203,7 +211,8 @@ class AgilePredict(BaseAPIClient):
                 ...
             ]
         """
-        slots = self.get_forecasts(region, days=days)
+        if slots is None:
+            slots = self.get_forecasts(region, days=days)
         if not slots:
             return []
 
@@ -237,3 +246,84 @@ class AgilePredict(BaseAPIClient):
             )
 
         return summaries
+
+    def get_cheapest_window(
+        self,
+        region: str = "H",
+        target_date=None,
+        block_hours: float = 3.0,
+        slots: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Find the cheapest contiguous price block on a given forecast day.
+
+        Slides a fixed-length window of contiguous 30-min slots across the day
+        and returns the block with the lowest average predicted price. The
+        default 3-hour block ("3h core") reflects a typical overnight EV top-up
+        so the hint names a realistic charging window rather than a single slot.
+
+        Args:
+            region: DNO region code (used only if slots must be fetched).
+            target_date: Day to search, as an ISO date string ("2026-03-23")
+                or a date object. If None, no day filter is applied.
+            block_hours: Length of the contiguous block in hours (default 3.0).
+            slots: Optional pre-fetched forecast slots (from get_forecasts).
+                If None, fetches a 7-day forecast — pass shared slots to avoid
+                a second API call.
+
+        Returns:
+            {"start": datetime (UTC-aware), "end": datetime (UTC-aware),
+            "avg_price": float} for the cheapest block, or None if no
+            contiguous block of the required length exists on that day.
+        """
+        if slots is None:
+            slots = self.get_forecasts(region, days=7)
+        if not slots:
+            return None
+
+        target_iso: Optional[str] = None
+        if target_date is not None:
+            target_iso = (
+                target_date.isoformat()
+                if isinstance(target_date, date)
+                else str(target_date)
+            )
+
+        # Parse slots to (datetime, price) and filter to the target day
+        parsed = []
+        for slot in slots:
+            dt = datetime.fromisoformat(slot["date_time"].replace("Z", "+00:00"))
+            if target_iso is not None and dt.date().isoformat() != target_iso:
+                continue
+            parsed.append((dt, slot["agile_pred"]))
+
+        n = int(block_hours * 2)  # number of 30-min slots in the block
+        if len(parsed) < n:
+            return None
+
+        parsed.sort(key=lambda p: p[0])
+
+        best_avg: Optional[float] = None
+        best_block = None
+        half_hour = timedelta(minutes=30)
+
+        # Slide over contiguous runs of 30-min slots only
+        for i in range(len(parsed) - n + 1):
+            block = parsed[i : i + n]
+            contiguous = all(
+                block[j + 1][0] - block[j][0] == half_hour for j in range(n - 1)
+            )
+            if not contiguous:
+                continue
+            avg = sum(price for _, price in block) / n
+            if best_avg is None or avg < best_avg:
+                best_avg = avg
+                best_block = block
+
+        if best_block is None:
+            return None
+
+        return {
+            "start": best_block[0][0],
+            "end": best_block[-1][0] + half_hour,
+            "avg_price": best_avg,
+        }

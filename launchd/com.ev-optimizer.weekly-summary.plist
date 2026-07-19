@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ev-optimizer.weekly-summary</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/tomeldridge/my_python_project/scripts/Momentum_dashboard/venv/bin/python3</string>
+        <string>/Users/tomeldridge/ev-charging-optimizer/src/scripts/weekly_summary.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/tomeldridge/ev-charging-optimizer</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>  <!-- Sunday = 0 -->
+        <key>Hour</key>
+        <integer>18</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/tomeldridge/ev-charging-optimizer/logs/weekly_summary.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/tomeldridge/ev-charging-optimizer/logs/weekly_summary.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

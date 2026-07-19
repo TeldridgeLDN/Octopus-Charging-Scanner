@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from modules.data_store import DataStore
 from modules.pushover import PushoverClient
 from modules.analyzer import OpportunityRating
+from modules.time_of_day import part_of_day_phrase, LONDON_TZ
 import yaml
 from dotenv import load_dotenv
 
@@ -123,16 +124,19 @@ def format_reminder(
     try:
         start_dt = datetime.fromisoformat(window_start.replace("Z", "+00:00"))
         end_dt = datetime.fromisoformat(window_end.replace("Z", "+00:00"))
-        start_time = start_dt.strftime("%H:%M")
-        end_time = end_dt.strftime("%H:%M")
+        # Convert UTC -> Europe/London before formatting (fixes BST off-by-one)
+        start_time = start_dt.astimezone(LONDON_TZ).strftime("%H:%M")
+        end_time = end_dt.astimezone(LONDON_TZ).strftime("%H:%M")
+        pod = part_of_day_phrase(start_dt)
     except Exception:
         start_time = "tonight"
         end_time = "morning"
+        pod = "tonight"
 
     # Emoji based on rating
     emoji = "🔋⚡" if rating == "EXCELLENT" else "🔋"
 
-    title = f"EV Optimizer: {emoji} Reminder: Good charging opportunity tonight"
+    title = f"EV Optimizer: {emoji} Reminder: Good charging opportunity {pod}"
 
     message = f"<b>Best window:</b> {start_time} - {end_time}\n"
     message += f"<b>Cost:</b> £{total_cost:.2f}\n"

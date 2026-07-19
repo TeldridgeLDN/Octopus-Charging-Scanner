@@ -14,3 +14,8 @@ mypy>=1.0.0
 
 # Optional for enhanced features
 pyyaml>=6.0.0
+
+# Google Calendar integration (optional)
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.1.0
+google-auth-oauthlib>=1.0.0

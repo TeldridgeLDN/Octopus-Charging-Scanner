@@ -60,32 +60,48 @@ class CarbonAPIClient(BaseAPIClient):
         else:
             logger.info("Using national carbon intensity forecast")
 
-        url = f"{self.BASE_URL}/intensity/date"
+        # Fetch today and tomorrow to ensure 48-hour coverage matching price API
+        from datetime import datetime, timedelta
 
-        try:
-            data = self.fetch(url)
-        except Exception as e:
-            logger.error(f"Failed to fetch carbon intensity: {e}")
-            return []
+        today = datetime.now().strftime("%Y-%m-%d")
+        tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # National endpoint: data[]
-        regional_data = data.get("data", [])
+        results = []
 
-        if not regional_data:
+        for date in [today, tomorrow]:
+            url = f"{self.BASE_URL}/intensity/date/{date}"
+            try:
+                data = self.fetch(url)
+                regional_data = data.get("data", [])
+
+                for entry in regional_data:
+                    from_time = entry.get("from")
+                    intensity_data = entry.get("intensity", {})
+                    # Use forecast, fall back to actual if available
+                    intensity = intensity_data.get("forecast") or intensity_data.get(
+                        "actual"
+                    )
+
+                    if from_time and intensity is not None:
+                        results.append({"time": from_time, "intensity": intensity})
+
+            except Exception as e:
+                logger.warning(f"Failed to fetch carbon intensity for {date}: {e}")
+
+        if not results:
             logger.warning("No carbon intensity data available")
             return []
 
-        results = []
-        for entry in regional_data:
-            from_time = entry.get("from")
-            intensity_data = entry.get("intensity", {})
-            forecast = intensity_data.get("forecast")
+        # Sort by time and remove duplicates
+        seen = set()
+        unique_results = []
+        for r in sorted(results, key=lambda x: x["time"]):
+            if r["time"] not in seen:
+                seen.add(r["time"])
+                unique_results.append(r)
 
-            if from_time and forecast is not None:
-                results.append({"time": from_time, "intensity": forecast})
-
-        logger.info(f"Retrieved {len(results)} carbon intensity slots")
-        return results
+        logger.info(f"Retrieved {len(unique_results)} carbon intensity slots (48h)")
+        return unique_results
 
     def get_current_intensity(self, postcode: str = "E1") -> Dict[str, Any]:
         """Get current carbon intensity for a postcode.

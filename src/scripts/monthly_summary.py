@@ -52,6 +52,67 @@ def load_config() -> Dict[str, Any]:
     return config
 
 
+def add_acix_section(
+    message: str, data_store: DataStore, year: int, month: int, config: Dict[str, Any]
+) -> str:
+    """Add ACIX charging insights to monthly summary.
+
+    Args:
+        message: Current message
+        data_store: DataStore instance
+        year: Year of summary
+        month: Month of summary
+        config: Configuration dictionary
+
+    Returns:
+        Updated message with ACIX section
+    """
+    acix_config = config.get("acix", {})
+    if not acix_config.get("enabled", False):
+        return message
+
+    try:
+        cost_tracker = CostTracker(data_store)
+        acix_summary = cost_tracker.get_acix_monthly_summary(year, month)
+
+        if acix_summary["num_sessions"] == 0:
+            return message
+
+        message += "\n<b>🧠 ACIX Detected Sessions:</b>\n"
+        message += f"  Sessions detected: {acix_summary['num_sessions']}\n"
+        message += f"  Total energy: {acix_summary['total_kwh']:.1f} kWh\n"
+        message += f"  Avg per session: {acix_summary['avg_kwh_per_session']:.1f} kWh\n"
+        message += f"  Detection confidence: {acix_summary['avg_confidence']:.0f}%\n"
+
+        # Add savings captured
+        if acix_summary.get("savings_captured", 0) > 0:
+            message += (
+                f"  💵 Savings captured: £{acix_summary['savings_captured']:.2f}\n"
+            )
+
+        # Add behavioral insights
+        insights = acix_summary.get("behavioral_insights")
+        if insights:
+            message += "\n<b>📊 Behavioral Analysis:</b>\n"
+            message += f"  Compliance rate: {insights['compliance_rate']:.0f}%\n"
+            message += f"  Timing score: {insights['avg_timing_score']:.0f}/100\n"
+
+            # Patterns
+            patterns = insights.get("patterns", {})
+            if patterns.get("avg_start_hour"):
+                hour = int(patterns["avg_start_hour"])
+                message += f"  Typical plug-in: {hour:02d}:00\n"
+
+            # Top recommendation
+            if insights.get("recommendations"):
+                message += f"  💡 {insights['recommendations'][0]}\n"
+
+    except Exception as e:
+        logger.warning(f"Could not add ACIX section: {e}")
+
+    return message
+
+
 def format_monthly_summary(
     summary: Dict[str, Any], projection: Dict[str, Any], config: Dict[str, Any]
 ) -> str:
@@ -188,6 +249,11 @@ def main():
 
         # Format notification
         message = format_monthly_summary(summary, projection, config)
+
+        # Add ACIX section (Phase 3 Task 13)
+        message = add_acix_section(
+            message, data_store, target_year, target_month, config
+        )
 
         # Send notification
         logger.info("Sending monthly summary notification")

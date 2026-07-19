@@ -15,11 +15,12 @@ import logging
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from modules.agile_predict_api import AgilePredict
+from modules.analyzer import Analyzer
+from modules.data_store import DataStore
 from modules.forecast_api import ForecastAPIClient
 from modules.octopus_api import OctopusAPIClient
-from modules.data_store import DataStore
 from modules.pushover import PushoverClient
-from modules.analyzer import Analyzer
 import yaml
 from dotenv import load_dotenv
 
@@ -123,17 +124,25 @@ def format_notification(analysis: Dict[str, Any], config: Dict[str, Any]) -> str
 
     message = "<b>📅 Weekly Charging Forecast</b>\n\n"
 
+    def _friendly_date(iso_date: str) -> str:
+        """Convert '2026-05-19' to 'Mon 19 May'."""
+        try:
+            dt = datetime.strptime(iso_date, "%Y-%m-%d")
+            return dt.strftime("%a %-d %b")
+        except (ValueError, TypeError):
+            return iso_date
+
     if best_days:
         message += "<b>✅ Best days to charge:</b>\n"
         for day in best_days[:3]:  # Top 3
-            date_str = day["date"]
+            date_str = _friendly_date(day["date"])
             message += f"  • {date_str}: {day['min_price']:.1f}p/kWh\n"
         message += "\n"
 
     if avoid_days:
         message += "<b>⚠️ Avoid charging on:</b>\n"
         for day in avoid_days[:2]:  # Worst 2
-            date_str = day["date"]
+            date_str = _friendly_date(day["date"])
             message += f"  • {date_str}: {day['min_price']:.1f}p/kWh\n"
         message += "\n"
 
@@ -183,26 +192,63 @@ def main():
         )
 
         # Fetch 7-day forecast
-        logger.info("Fetching 7-day forecast from Guy Lipman")
         region = config["user"]["region"]
+        forecast_data = []
 
+        # Primary: agile_predict ML forecast (daily summaries)
         try:
-            forecast_data = forecast_client.get_forecasts(region)
-            logger.info(f"Fetched {len(forecast_data)} days of forecast data")
+            logger.info("Fetching 7-day forecast from agile_predict")
+            agile_client = AgilePredict()
+            day_summaries = agile_client.get_day_summary(region, days=7)
+            if day_summaries:
+                forecast_data = [
+                    {
+                        "date": d["date"],
+                        "avg_price": d["avg_pred"],
+                        "min_price": d["min_pred"],
+                    }
+                    for d in day_summaries
+                ]
+                logger.info(
+                    f"Fetched {len(forecast_data)} days of forecast data from agile_predict"
+                )
         except Exception as e:
-            logger.warning(f"Guy Lipman forecast unavailable: {e}")
-            logger.info("Falling back to Octopus next-day only")
+            logger.warning(f"agile_predict forecast unavailable: {e}")
 
-            # Fallback: Use Octopus next-day prices only
+        # Fallback: Guy Lipman hourly slots aggregated into daily summaries
+        if not forecast_data:
+            try:
+
+                logger.info("Falling back to Guy Lipman hourly forecast")
+                slots = forecast_client.get_forecasts(region)
+                if slots:
+                    by_date: Dict[str, list] = {}
+                    for slot in slots:
+                        date_str = slot["time"][:10]
+                        by_date.setdefault(date_str, []).append(slot["price"])
+                    forecast_data = [
+                        {
+                            "date": date_str,
+                            "avg_price": round(sum(prices) / len(prices), 2),
+                            "min_price": round(min(prices), 2),
+                        }
+                        for date_str, prices in sorted(by_date.items())
+                    ]
+                    logger.info(
+                        f"Fetched {len(forecast_data)} days of forecast data from Guy Lipman"
+                    )
+            except Exception as e:
+                logger.warning(f"Guy Lipman forecast unavailable: {e}")
+
+        if not forecast_data:
+            # Last resort: Octopus next-day prices only
+            logger.info("Falling back to Octopus next-day prices")
             prices = octopus_client.get_prices(region)
             if not prices:
                 logger.error("No price data available from any source")
                 return 1
-
-            # Convert to simple forecast format
             avg_price = sum(p["value_inc_vat"] for p in prices) / len(prices)
             min_price = min(p["value_inc_vat"] for p in prices)
-
             forecast_data = [
                 {
                     "date": "Tomorrow",

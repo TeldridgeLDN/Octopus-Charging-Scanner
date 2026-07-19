@@ -525,27 +525,6 @@ def add_monthly_cost_section(message: str, config: Dict[str, Any]) -> str:
     return message
 
 
-def _format_day_label(date_str: str) -> str:
-    """Return a human-readable label for a forecast date.
-
-    Args:
-        date_str: ISO date string e.g. "2026-03-30"
-
-    Returns:
-        "Tomorrow" for next day, weekday name otherwise (e.g. "Wednesday")
-    """
-    from datetime import date as _date
-
-    try:
-        entry_date = _date.fromisoformat(date_str)
-        delta = (entry_date - _date.today()).days
-        if delta == 1:
-            return "Tomorrow"
-        return entry_date.strftime("%A")
-    except ValueError:
-        return date_str
-
-
 def add_week_ahead_section(message: str, config: Dict[str, Any]) -> str:
     """Add best forecast days for the coming week to the summary.
 
@@ -561,6 +540,7 @@ def add_week_ahead_section(message: str, config: Dict[str, Any]) -> str:
     """
     try:
         from modules.agile_predict_api import AgilePredict
+        from modules.time_of_day import format_day_label
 
         region = config["user"]["region"]
         client = AgilePredict()
@@ -578,7 +558,7 @@ def add_week_ahead_section(message: str, config: Dict[str, Any]) -> str:
         message += "\n<b>📅 Best days to charge next week:</b>\n"
 
         for entry in ranked[:4]:
-            label = _format_day_label(entry["date"])
+            label = format_day_label(entry["date"])
             star = " ⭐" if entry == ranked[0] else ""
             message += f"  {label}: {entry['avg_pred']:.1f}p/kWh ({entry['confidence']}){star}\n"
 
