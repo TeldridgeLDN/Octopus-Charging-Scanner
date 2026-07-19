@@ -68,6 +68,16 @@ correct side, and confirm green. Do NOT "fix" by loosening the test without unde
 - Coverage ~46% overall. 0%-coverage modules: `automation_triggers.py`, `ev_detector.py`,
   `google_calendar.py`, `recommendation_analyzer.py`. W3.1 naturally lifts `google_calendar.py`.
 
+### W3.5 — Weekly forecast never named best days  [Bug, Med, S]  ✅ DONE (`62b6f4c`)
+
+`weekly_forecast.format_notification()` rendered the "Best days to charge" section only
+`if best_days:` where `best_days = score >= 75`. On flat/expensive weeks (all days ≤50) the
+push named ZERO charging days — the message's whole purpose. **Fix (format-only, no
+`analyze_week` schema change):** top section always renders; ≥75 keeps confident wording
+byte-identically, else falls back to top-scored days under "Cheapest days this week"
+(score≥50, then `daily_scores[:2]` on all-avoid weeks); avoid section filtered to exclude
+any already-shown date (no day in both). +3 tests (flat/good/all-avoid). Suite 255/1/0.
+
 ### W3.4 — Untracked docs & root tools  [Housekeeping, Low, S]
 Still untracked (pre-existing, NOT Wave 2 output): `docs/archive/` (moved session
 summaries), several root guides (`DEPLOYMENT.md`, `PRD.md`, `QUICK_START.md`,
