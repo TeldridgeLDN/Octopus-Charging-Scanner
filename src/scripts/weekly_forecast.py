@@ -125,6 +125,7 @@ def format_notification(analysis: Dict[str, Any], config: Dict[str, Any]) -> str
     """
     best_days = analysis["best_days"]
     avoid_days = analysis["avoid_days"]
+    daily_scores = analysis["daily_scores"]
     avg_price = analysis["avg_week_price"]
 
     message = "<b>📅 Weekly Charging Forecast</b>\n\n"
@@ -137,16 +138,31 @@ def format_notification(analysis: Dict[str, Any], config: Dict[str, Any]) -> str
         except (ValueError, TypeError):
             return iso_date
 
+    # Always name some days to charge. On confident weeks (a day scores >= 75)
+    # keep the assertive "Best days" wording; otherwise fall back to the
+    # least-expensive days so the notification is never empty-handed.
     if best_days:
         message += "<b>✅ Best days to charge:</b>\n"
-        for day in best_days[:3]:  # Top 3
-            date_str = _friendly_date(day["date"])
-            message += f"  • {date_str}: {day['min_price']:.1f}p/kWh\n"
-        message += "\n"
+        top_days = best_days[:3]  # Top 3
+    else:
+        top_days = [d for d in daily_scores if d["score"] >= 50][:3]
+        if not top_days:
+            # All-avoid week: still surface the two least-bad days.
+            top_days = daily_scores[:2]
+        message += "<b>✅ Cheapest days this week:</b>\n"
 
-    if avoid_days:
+    shown_top_dates = set()
+    for day in top_days:
+        date_str = _friendly_date(day["date"])
+        message += f"  • {date_str}: {day['min_price']:.1f}p/kWh\n"
+        shown_top_dates.add(day["date"])
+    message += "\n"
+
+    # A date must never appear in both sections.
+    avoid_to_show = [d for d in avoid_days if d["date"] not in shown_top_dates][:2]
+    if avoid_to_show:
         message += "<b>⚠️ Avoid charging on:</b>\n"
-        for day in avoid_days[:2]:  # Worst 2
+        for day in avoid_to_show:  # Worst 2
             date_str = _friendly_date(day["date"])
             message += f"  • {date_str}: {day['min_price']:.1f}p/kWh\n"
         message += "\n"
