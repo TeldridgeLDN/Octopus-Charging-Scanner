@@ -27,7 +27,7 @@ class DataStore:
     - ACIX metrics: Behavioral metrics
     """
 
-    DATA_DIR = Path("data")
+    DATA_DIR = Path(__file__).resolve().parents[2] / "data"
     FORECAST_FILE = DATA_DIR / "forecast_history.json"
     RECOMMENDATIONS_FILE = DATA_DIR / "daily_recommendations.json"
     USER_ACTIONS_FILE = DATA_DIR / "user_actions.json"
