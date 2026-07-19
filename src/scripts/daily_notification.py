@@ -17,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from modules.octopus_api import OctopusAPIClient
 from modules.carbon_api import CarbonAPIClient
-from modules.forecast_api import ForecastAPIClient
 from modules.data_store import DataStore
 from modules.pushover import PushoverClient
 from modules.analyzer import (
@@ -30,6 +29,7 @@ from modules.analyzer import (
 )
 from modules.multi_day_planner import MultiDayPlanner
 from modules.agile_predict_api import AgilePredict
+from modules.price_sources import fetch_forecast_price_slots
 from modules.time_of_day import (
     part_of_day_phrase,
     format_day_label,
@@ -48,6 +48,13 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+# Map agile_predict confidence labels to short display words for the notification.
+CONFIDENCE_SHORT = {
+    "high confidence": "high",
+    "moderate confidence": "moderate",
+    "uncertain forecast": "uncertain",
+}
 
 
 def load_config() -> Dict[str, Any]:
@@ -142,14 +149,14 @@ def fetch_data(config: Dict[str, Any]) -> tuple[list[PriceSlot], list[CarbonSlot
 
         else:
             logger.warning(
-                "⚠️ Octopus prices incomplete - falling back to Guy Lipman forecast"
+                "⚠️ Octopus prices incomplete - falling back to forecast sources"
             )
-            price_slots, price_source = fetch_forecast_prices(region)
+            price_slots, price_source = fetch_forecast_price_slots(region)
 
     except Exception as e:
         logger.error(f"Failed to fetch Octopus prices: {e}")
-        logger.info("Falling back to Guy Lipman forecast")
-        price_slots, price_source = fetch_forecast_prices(region)
+        logger.info("Falling back to forecast sources")
+        price_slots, price_source = fetch_forecast_price_slots(region)
 
     if not price_slots:
         raise RuntimeError("Failed to fetch prices from all sources")
@@ -183,47 +190,6 @@ def fetch_data(config: Dict[str, Any]) -> tuple[list[PriceSlot], list[CarbonSlot
             carbon_slots.append(CarbonSlot(price_slot.time, 175))
 
     return price_slots, carbon_slots, price_source
-
-
-def fetch_forecast_prices(region: str) -> tuple[list[PriceSlot], str]:
-    """Fetch prices from Guy Lipman forecast as fallback.
-
-    Args:
-        region: DNO region code
-
-    Returns:
-        Tuple of (price_slots, price_source)
-
-    Raises:
-        RuntimeError: If forecast fetch fails
-    """
-    logger.info(f"Fetching Guy Lipman forecast for region {region}")
-    forecast_client = ForecastAPIClient()
-
-    try:
-        forecasts = forecast_client.get_forecasts(region)
-
-        if not forecasts:
-            raise RuntimeError("Forecast returned no data")
-
-        logger.info(f"✅ Using Guy Lipman FORECAST ({len(forecasts)} slots)")
-
-        # Convert forecast format to PriceSlot objects
-        price_slots = []
-        for f in forecasts:
-            # Parse date and time
-            date_str = f["date"]
-            time_str = f["time"]
-            dt_str = f"{date_str}T{time_str}:00+00:00"
-            time = datetime.fromisoformat(dt_str)
-
-            price_slots.append(PriceSlot(time, f["price"], "forecast"))
-
-        return price_slots, "forecast"
-
-    except Exception as e:
-        logger.error(f"Failed to fetch forecast: {e}")
-        raise RuntimeError("Forecast API failed") from e
 
 
 def build_better_day_hint(
@@ -306,6 +272,7 @@ def format_notification(
     current_time: datetime = None,
     acix_insights: str = "",
     better_day_hint: str = "",
+    forecast_confidence: str = "",
 ) -> tuple[str, str, int, str]:
     """Format charging recommendation notification.
 
@@ -315,6 +282,8 @@ def format_notification(
         price_source: Source of price data ("octopus_actual" or "forecast")
         current_time: Current time for status checking (defaults to now)
         acix_insights: Optional ACIX behavioral insights text
+        forecast_confidence: Optional forecast confidence label (forecast days
+            only); appended as its own line when non-empty
 
     Returns:
         Tuple of (title, message, priority, sound)
@@ -410,7 +379,7 @@ def format_notification(
         message += f"<b>💰 Cost:</b> £{window.total_cost:.2f} for {kwh}kWh\n"
         message += f"<b>📊 Avg price:</b> {window.avg_price:.1f}p/kWh\n"
 
-        if window.savings_vs_baseline > 0:
+        if window.savings_vs_baseline is not None and window.savings_vs_baseline > 0:
             message += f"<b>💵 Save:</b> £{window.savings_vs_baseline:.2f} vs evening\n"
 
     # Only add carbon/reason for normal pricing
@@ -438,6 +407,8 @@ def format_notification(
         message += "<b>📊 Data:</b> Actual prices (published) ✅\n"
     else:
         message += "<b>📊 Data:</b> Forecast prices (predicted)\n"
+        if forecast_confidence:
+            message += f"<b>🔮 Forecast confidence:</b> {forecast_confidence}\n"
 
     # Add ACIX behavioral insights if available
     if acix_insights:
@@ -751,7 +722,7 @@ def main():
             )
 
             # Send high-priority alert
-            pushover_client.send_notification(
+            neg_success = pushover_client.send_notification(
                 title=neg_title,
                 message=neg_message,
                 priority=1,  # High priority
@@ -759,6 +730,10 @@ def main():
                 html=True,
             )
             logger.info("Negative pricing alert sent!")
+
+            # Exactly one notification per negative-pricing event: the dedicated
+            # alert above already covers it, so skip the normal notification path.
+            return 0 if neg_success else 1
 
         # Fetch agile_predict forecasts once — shared by summaries + cheapest window
         region = config["user"]["region"]
@@ -779,7 +754,7 @@ def main():
         is_exceptional = (
             window.rating == OpportunityRating.EXCELLENT  # EXCELLENT rating
             or window.avg_price <= 8.0  # Very cheap (<8p/kWh)
-            or window.savings_vs_baseline >= 1.50  # Significant savings (>£1.50)
+            or (window.savings_vs_baseline or 0) >= 1.50  # Significant savings (>£1.50)
             or has_negative_pricing  # Already handled above, but included for clarity
         )
 
@@ -792,6 +767,17 @@ def main():
             if acix_insights:
                 logger.info(f"📊 ACIX insights: {has_acix_alerts=}")
 
+            # Forecast confidence (forecast days only) — match the agile summary
+            # for this window's date and map it to a short display word.
+            forecast_confidence = ""
+            if price_source != "octopus_actual":
+                window_date = window.start.date().isoformat()
+                match = next(
+                    (s for s in agile_summaries if s["date"] == window_date), None
+                )
+                label = match["confidence"] if match else "uncertain forecast"
+                forecast_confidence = CONFIDENCE_SHORT.get(label, "uncertain")
+
             # Format and send normal notification
             title, message, priority, sound = format_notification(
                 window,
@@ -799,6 +785,7 @@ def main():
                 price_source,
                 acix_insights=acix_insights,
                 better_day_hint=better_day_hint,
+                forecast_confidence=forecast_confidence,
             )
 
             reason = (
@@ -825,7 +812,7 @@ def main():
             logger.info(
                 f"⏸️  Skipping notification - not exceptional "
                 f"(rating={window.rating.value}, price={window.avg_price:.1f}p/kWh, "
-                f"savings=£{window.savings_vs_baseline:.2f})"
+                f"savings=£{(window.savings_vs_baseline or 0):.2f})"
             )
             logger.info(
                 "💡 Tip: Use './charge <current%> <target%> --notify' for personalized recommendations"

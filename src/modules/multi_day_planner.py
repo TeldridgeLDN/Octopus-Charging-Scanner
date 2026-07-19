@@ -20,6 +20,7 @@ from .analyzer import (
     CarbonSlot,
     OpportunityRating,
 )
+from .price_sources import agile_to_price_slots, guy_lipman_to_price_slots
 from .data_store import DataStore
 
 logger = logging.getLogger(__name__)
@@ -176,6 +177,9 @@ class MultiDayPlanner:
         else:
             logger.warning("agile_predict unavailable — will fall back to Guy Lipman")
 
+        # Convert once via the shared converter; days are filtered inside the loop.
+        agile_price_slots = agile_to_price_slots(agile_slots) if agile_slots else []
+
         # Get carbon data
         try:
             carbon_data = self.carbon_client.get_intensity(postcode)
@@ -222,15 +226,10 @@ class MultiDayPlanner:
                     day_prices = []
 
             # Primary forecast fallback: agile_predict
-            if not day_prices and agile_slots:
-                for s in agile_slots:
-                    slot_time = datetime.fromisoformat(
-                        s["date_time"].replace("Z", "+00:00")
-                    )
-                    if target_date <= slot_time < day_end:
-                        day_prices.append(
-                            PriceSlot(slot_time, s["agile_pred"], "agile_predict")
-                        )
+            if not day_prices and agile_price_slots:
+                day_prices = [
+                    p for p in agile_price_slots if target_date <= p.time < day_end
+                ]
 
                 if day_prices:
                     price_source = "agile_predict"
@@ -245,31 +244,9 @@ class MultiDayPlanner:
                 try:
                     forecasts = self.forecast_client.get_forecasts(region)
 
-                    for f in forecasts:
-                        # Handle both old format (date+time) and new format (ISO time)
-                        if "date" in f:
-                            # Old table-parsed format: {"date": "2025-12-07", "time": "00:00"}
-                            date_str = f["date"]
-                            time_str = f["time"]
-                            dt_str = f"{date_str}T{time_str}:00+00:00"
-                            slot_time = datetime.fromisoformat(dt_str)
-                        else:
-                            # New JavaScript-parsed format: {"time": "2025-12-07T00:00:00"}
-                            time_str = f["time"]
-                            # Handle both naive and timezone-aware formats
-                            if "+" in time_str or time_str.endswith("Z"):
-                                slot_time = datetime.fromisoformat(
-                                    time_str.replace("Z", "+00:00")
-                                )
-                            else:
-                                slot_time = datetime.fromisoformat(time_str).replace(
-                                    tzinfo=timezone.utc
-                                )
-
-                        if target_date <= slot_time < day_end:
-                            day_prices.append(
-                                PriceSlot(slot_time, f["price"], "forecast")
-                            )
+                    for slot in guy_lipman_to_price_slots(forecasts):
+                        if target_date <= slot.time < day_end:
+                            day_prices.append(slot)
 
                     price_source = "forecast"
                     logger.info(

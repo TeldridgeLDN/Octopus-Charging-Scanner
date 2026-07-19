@@ -37,7 +37,14 @@ def _make_config():
             "region": "H",
         },
         "apis": {
-            "pushover": {"user_key": "u", "api_token": "t"},
+            "pushover": {
+                "user_key": "u",
+                "api_token": "t",
+                "sounds": {
+                    "excellent": "magic",
+                    "good": "bike",
+                },
+            },
         },
     }
 

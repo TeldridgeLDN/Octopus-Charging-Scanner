@@ -35,6 +35,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Neutral carbon intensity (UK grid average) used when the weekly forecast has
+# no carbon data — matches the daily notification's price-only fallback.
+NEUTRAL_CARBON = 175
+
 
 def load_config() -> Dict[str, Any]:
     """Load configuration from config.yaml and .env
@@ -74,9 +78,10 @@ def analyze_week(
         avg_price = day_forecast.get("avg_price", 0)
         min_price = day_forecast.get("min_price", 0)
 
-        # Use minimum price for the day as a proxy for best opportunity
-        # Carbon data not available in weekly forecast
-        score = analyzer.calculate_price_score(min_price)
+        # Rank by the day's average price combined with a neutral carbon value,
+        # matching the daily notification's price+carbon (60/40) scoring. Carbon
+        # data isn't available in the weekly forecast, so use the grid average.
+        score = analyzer.calculate_opportunity_score(avg_price, NEUTRAL_CARBON)
         rating = analyzer.classify_opportunity(score)
 
         daily_scores.append(

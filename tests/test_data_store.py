@@ -1,12 +1,20 @@
 """Tests for Data Storage Layer."""
 
 import pytest
+from pathlib import Path
 from datetime import datetime, timedelta
+import src.modules.data_store as data_store_module
 from src.modules.data_store import DataStore
 
 
 class TestDataStore:
     """Tests for DataStore."""
+
+    def test_data_dir_is_absolute_repo_data(self):
+        """Default DATA_DIR is an absolute path at <repo>/data."""
+        expected = Path(data_store_module.__file__).resolve().parents[2] / "data"
+        assert DataStore.DATA_DIR.is_absolute()
+        assert DataStore.DATA_DIR == expected
 
     def test_init(self, temp_data_dir):
         """Test data store initialization."""

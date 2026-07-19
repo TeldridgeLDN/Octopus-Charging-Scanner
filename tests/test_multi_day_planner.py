@@ -196,6 +196,11 @@ class TestMultiDayPlanner:
         # Mock carbon API
         planner.carbon_client.get_intensity = Mock(return_value=[])
 
+        # Mock agile_predict: the planner fetches it unconditionally before the
+        # per-day loop, so leaving it unmocked makes a live HTTP call to
+        # prices.fly.dev. Octopus covers days 0-1 here regardless.
+        planner.agile_predict_client.get_forecasts = Mock(return_value=[])
+
         # Get multi-day data (planner fixture uses 3 days)
         multi_day_data = planner._get_multi_day_prices()
 
@@ -218,6 +223,10 @@ class TestMultiDayPlanner:
 
         # Mock Octopus to fail
         planner.octopus_client.get_prices = Mock(side_effect=Exception("API Error"))
+
+        # Mock agile_predict to return nothing so we fall through to Guy Lipman
+        # (prevents a live HTTP call to prices.fly.dev).
+        planner.agile_predict_client.get_forecasts = Mock(return_value=[])
 
         # Mock forecast API
         forecast_data = []
@@ -247,6 +256,47 @@ class TestMultiDayPlanner:
             _, price_slots, _, price_source = day_data
             assert price_source == "forecast"
             assert len(price_slots) > 0
+
+    def test_get_multi_day_prices_prefers_agile_over_guy_lipman(self, planner):
+        """agile_predict is used (not Guy Lipman) when it returns data."""
+        today = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        # No Octopus coverage -> forecast tiers apply
+        planner.octopus_client.get_prices = Mock(return_value=[])
+
+        # agile_predict returns 3 days of half-hourly slots
+        agile_slots = []
+        for day_offset in range(3):
+            base = today + timedelta(days=day_offset)
+            for i in range(48):
+                slot_time = base + timedelta(minutes=30 * i)
+                agile_slots.append(
+                    {
+                        "date_time": slot_time.isoformat().replace("+00:00", "Z"),
+                        "agile_pred": 12.0 + i * 0.1,
+                        "agile_low": 8.0,
+                        "agile_high": 16.0,
+                        "source": "agile_predict",
+                    }
+                )
+        planner.agile_predict_client.get_forecasts = Mock(return_value=agile_slots)
+
+        # Guy Lipman available but must NOT be consulted
+        planner.forecast_client.get_forecasts = Mock(return_value=[])
+        planner.carbon_client.get_intensity = Mock(return_value=[])
+
+        multi_day_data = planner._get_multi_day_prices()
+
+        assert len(multi_day_data) == 3
+        for _, price_slots, _, price_source in multi_day_data:
+            assert price_source == "agile_predict"
+            assert len(price_slots) == 48
+            assert all(p.source == "agile_predict" for p in price_slots)
+
+        # Guy Lipman fallback never reached
+        assert not planner.forecast_client.get_forecasts.called
 
     def test_compare_days(self, planner, mock_analyzer):
         """Test day comparison logic"""
