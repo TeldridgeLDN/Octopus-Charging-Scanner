@@ -135,7 +135,7 @@ def log_charge(
         if recommendation:
             rating = recommendation.get("rating", "UNKNOWN")
             cost = recommendation.get("total_cost", 0)
-            savings = recommendation.get("savings", 0)
+            savings = recommendation.get("savings") or 0
 
             print(f"\n📊 Recommendation for {charge_date}:")
             print(f"   Rating: {rating}")

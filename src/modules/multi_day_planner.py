@@ -458,60 +458,9 @@ class MultiDayPlanner:
             return True
 
         try:
-            from .google_calendar import GoogleCalendarClient
-
-            credentials_path = cal_config.get(
-                "credentials_path", "config/google_credentials.json"
-            )
-            calendar_id = cal_config.get("calendar_id")
-
-            if not calendar_id:
-                logger.warning("Google Calendar ID not configured")
-                return False
-
-            client = GoogleCalendarClient(credentials_path, calendar_id)
-
-            # Convert days to dict format
-            days_data = []
-            for day in plan.days:
-                days_data.append(
-                    {
-                        "date": day.date,
-                        "day_name": day.day_name,
-                        "avg_price": day.avg_price,
-                        "optimal_window": day.optimal_window,
-                        "cost": day.cost,
-                        "rating": day.rating,
-                        "price_source": day.price_source,
-                        "savings_vs_today": day.savings_vs_today,
-                        "avg_carbon": day.avg_carbon,
-                    }
-                )
-
-            reminders = cal_config.get("reminders", [60, 15])
-
-            event_ids = client.create_multi_day_events(
-                days=days_data,
-                kwh=plan.kwh_amount,
-                best_day=plan.best_day,
-                reminders=reminders,
-            )
-
-            logger.info(f"Synced {len(event_ids)} events to Google Calendar")
-
-            # Cleanup old events
-            if cal_config.get("delete_past_events", True):
-                retention_days = cal_config.get("retention_days", 7)
-                cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
-                deleted = client.delete_old_events(cutoff)
-                if deleted > 0:
-                    logger.info(f"Cleaned up {deleted} old calendar events")
-
-            return True
-
-        except FileNotFoundError as e:
-            logger.warning(f"Google Calendar credentials not found: {e}")
-            return False
-        except Exception as e:
+            from .google_calendar import sync_plan_to_calendar
+        except ImportError as e:
             logger.warning(f"Failed to sync to Google Calendar: {e}")
             return False
+
+        return sync_plan_to_calendar(plan, cal_config)

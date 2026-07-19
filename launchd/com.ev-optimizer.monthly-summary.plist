@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/tomeldridge/my_python_project/scripts/Momentum_dashboard/venv/bin/python3</string>
+        <string>/Users/tomeldridge/ev-charging-optimizer/venv/bin/python3</string>
         <string>/Users/tomeldridge/ev-charging-optimizer/src/scripts/monthly_summary.py</string>
     </array>
 

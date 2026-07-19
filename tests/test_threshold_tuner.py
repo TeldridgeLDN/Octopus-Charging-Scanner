@@ -263,7 +263,7 @@ class TestShouldUpdateThresholds:
         with open(recs_file, "w") as f:
             json.dump(recommendations, f)
 
-        current_thresholds = {"price_excellent": 10.0, "price_good": 15.0}
+        current_thresholds = {"price_excellent": 10.0, "price_good": 10.1}
         should_update = tuner.should_update_thresholds(current_thresholds)
 
         # Thresholds haven't changed much

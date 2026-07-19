@@ -229,6 +229,33 @@ class TestWeekendPatterns:
         assert analysis["weekday_good_opps"] == 1
         assert analysis["weekend_good_opps"] == 0
 
+    def test_null_savings_treated_as_zero(self):
+        """Test that a null savings value is treated as zero, not crashing."""
+        recommendations = [
+            {
+                "date": "2025-12-02",
+                "day_type": "weekday",
+                "rating": "GOOD",
+                "avg_price": 10.0,
+                "total_cost": 2.0,
+                "total_carbon": 100,
+                "savings": 1.5,
+            },
+            {
+                "date": "2025-12-03",
+                "day_type": "weekday",
+                "rating": "GOOD",
+                "avg_price": 12.0,
+                "total_cost": 2.5,
+                "total_carbon": 120,
+                "savings": None,
+            },
+        ]
+
+        analysis = analyze_week(recommendations, [])
+
+        assert analysis["total_savings_potential"] == 1.5
+
     def test_mixed_ratings_weekend_tracking(self):
         """Test that only GOOD/EXCELLENT count as opportunities"""
         recommendations = [

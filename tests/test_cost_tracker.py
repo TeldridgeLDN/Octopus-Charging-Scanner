@@ -118,6 +118,35 @@ class TestCostTracker:
         )  # 2 EXCELLENT + 1 GOOD in recommendations
         assert result["adherence_rate"] == 100.0  # 3/3 = 100%
 
+    def test_aggregate_month_null_savings(self, cost_tracker, data_store):
+        """Test null savings is treated as zero and does not crash aggregation."""
+        data_store.save_recommendation(
+            {
+                "date": "2025-12-01",
+                "total_cost": 4.50,
+                "savings": 1.50,
+                "rating": "GOOD",
+                "avg_price": 10.0,
+            }
+        )
+        data_store.save_recommendation(
+            {
+                "date": "2025-12-02",
+                "total_cost": 5.00,
+                "savings": None,
+                "rating": "GOOD",
+                "avg_price": 12.0,
+            }
+        )
+        data_store.save_user_action({"date": "2025-12-01", "action": "charged"})
+        data_store.save_user_action({"date": "2025-12-02", "action": "charged"})
+
+        result = cost_tracker.aggregate_month(2025, 12, kwh_per_charge=30.0)
+
+        assert result["total_savings"] == 1.50  # 1.50 + (None -> 0)
+        assert result["total_cost"] == 9.50  # 4.50 + 5.00
+        assert result["num_charges"] == 2
+
     def test_aggregate_month_empty(self, cost_tracker):
         """Test monthly aggregation with no data"""
         result = cost_tracker.aggregate_month(2025, 11, kwh_per_charge=30.0)

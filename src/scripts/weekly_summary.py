@@ -91,7 +91,7 @@ def analyze_week(
 
         total_recommended_cost += rec.get("total_cost", 0)
         total_recommended_carbon += rec.get("total_carbon", 0)
-        total_savings_potential += rec.get("savings", 0)
+        total_savings_potential += rec.get("savings") or 0
 
         # Separate by day type
         day_type = rec.get("day_type", "weekday")
