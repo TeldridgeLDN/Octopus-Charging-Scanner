@@ -160,7 +160,7 @@ class ThresholdTuner:
             True if thresholds are more than 2p different from recommended
         """
         recommended = self.get_recommended_thresholds(
-            Path("data/daily_recommendations.json")
+            self.data_dir / "daily_recommendations.json"
         )
 
         price_diff_excellent = abs(

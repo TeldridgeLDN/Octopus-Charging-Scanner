@@ -118,7 +118,7 @@ def format_reminder(
     window_start = recommendation.get("window_start", "")
     window_end = recommendation.get("window_end", "")
     total_cost = recommendation.get("total_cost", 0)
-    savings = recommendation.get("savings", 0)
+    savings = recommendation.get("savings") or 0
 
     # Parse times for display
     try:

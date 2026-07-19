@@ -68,3 +68,88 @@ def test_avoid_days_threshold():
 
     assert best_dates == ["2026-01-05"]  # score 80 >= 75
     assert avoid_dates == ["2026-01-06"]  # score 35 < 50
+
+
+# Score bands with NEUTRAL_CARBON=175 (carbon_score always 50):
+#   combined = 0.6*price_score + 0.4*50 = 0.6*price_score + 20
+#     avg <= 10  -> 0.6*100 + 20 = 80  (>=75 best day)
+#     10 < avg <= 15 -> 0.6*75 + 20 = 65  (in [50,75))
+#     15 < avg <= 20 -> 0.6*50 + 20 = 50  (in [50,75))
+#     avg > 20   -> 0.6*25 + 20 = 35  (<50 avoid)
+
+_CONFIG = {"user": {"typical_charge_kwh": 40}}
+
+
+def test_flat_week_names_cheapest_days():
+    # No day <= 10p, so no day reaches score 75. Two days in [50,75).
+    #   12.0p -> price_score 75 -> score 65
+    #   14.0p -> price_score 75 -> score 65
+    #   18.0p -> price_score 50 -> score 50
+    # None avoid (all >= 50), best_days empty. Lowest avg = 2026-01-12.
+    forecast_data = [
+        {"date": "2026-01-12", "avg_price": 12.0, "min_price": 6.0},
+        {"date": "2026-01-13", "avg_price": 14.0, "min_price": 7.0},
+        {"date": "2026-01-14", "avg_price": 18.0, "min_price": 9.0},
+    ]
+
+    analysis = wf.analyze_week(forecast_data, _analyzer())
+    assert analysis["best_days"] == []
+
+    message = wf.format_notification(analysis, _CONFIG)
+
+    assert "Cheapest days this week" in message
+    assert "Best days to charge" not in message
+    # Lowest-avg day (12.0p, 2026-01-12) -> "Mon 12 Jan".
+    assert "Mon 12 Jan" in message
+    assert "Weekly outlook" in message
+
+
+def test_good_week_keeps_confident_wording():
+    # 8.0p -> price_score 100 -> score 80 (>= 75, a real best day).
+    forecast_data = [
+        {"date": "2026-01-12", "avg_price": 8.0, "min_price": 4.0},
+        {"date": "2026-01-13", "avg_price": 14.0, "min_price": 7.0},
+    ]
+
+    analysis = wf.analyze_week(forecast_data, _analyzer())
+    assert analysis["best_days"]  # non-empty
+
+    message = wf.format_notification(analysis, _CONFIG)
+
+    assert "Best days to charge" in message
+    assert "Cheapest days this week" not in message
+
+
+def test_no_day_in_both_sections():
+    # All avg > 20 -> every day scores 35 (< 50): all-avoid week.
+    # cheapest list is empty, so fall back to the 2 least-bad days.
+    forecast_data = [
+        {"date": "2026-01-12", "avg_price": 22.0, "min_price": 11.0},
+        {"date": "2026-01-13", "avg_price": 25.0, "min_price": 12.0},
+        {"date": "2026-01-14", "avg_price": 28.0, "min_price": 13.0},
+    ]
+
+    analysis = wf.analyze_week(forecast_data, _analyzer())
+    assert analysis["best_days"] == []
+    assert len(analysis["avoid_days"]) == 3
+
+    message = wf.format_notification(analysis, _CONFIG)
+
+    assert "Cheapest days this week" in message
+
+    # The 2 days named at the top (stable sort keeps input order for ties):
+    top_dates = ["Mon 12 Jan", "Tue 13 Jan"]
+    for friendly in top_dates:
+        assert friendly in message
+
+    # Split into top and avoid sections; no top date may appear in avoid.
+    avoid_idx = message.index("Avoid charging on")
+    top_section = message[:avoid_idx]
+    avoid_section = message[avoid_idx:]
+    for friendly in top_dates:
+        assert friendly in top_section
+        assert friendly not in avoid_section
+
+    # No date string appears twice anywhere in the message.
+    for friendly in ["Mon 12 Jan", "Tue 13 Jan", "Wed 14 Jan"]:
+        assert message.count(friendly) <= 1

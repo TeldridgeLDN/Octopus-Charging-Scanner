@@ -92,7 +92,7 @@ class CostTracker:
             if action_date in rec_by_date:
                 rec = rec_by_date[action_date]
                 cost = rec.get("total_cost", 0)
-                savings = rec.get("savings", 0)
+                savings = rec.get("savings") or 0
                 rating = rec.get("rating", "AVERAGE")
 
                 total_cost += cost

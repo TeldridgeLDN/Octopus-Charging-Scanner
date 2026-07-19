@@ -13,6 +13,9 @@ build/
 
 # Environment variables
 .env
+
+# TaskMaster tooling state (local planning artifacts, not project code)
+.taskmaster/
 .env.local
 
 # Credentials (service-account keys, OAuth secrets) - never commit
@@ -27,6 +30,7 @@ config/*secret*.json
 data/*.json
 !data/.gitkeep
 logs/*.log
+**/logs/*.log
 !logs/.gitkeep
 charts/*.png
 !charts/.gitkeep
