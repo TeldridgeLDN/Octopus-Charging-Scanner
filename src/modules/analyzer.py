@@ -60,7 +60,7 @@ class ChargingWindow:
     opportunity_score: float  # 0-100
     rating: OpportunityRating
     reason: str  # "cheap", "clean", "both"
-    savings_vs_baseline: float  # £
+    savings_vs_baseline: Optional[float]  # £ (None when no real baseline available)
 
     def get_status(self, current_time: Optional[datetime] = None) -> WindowStatus:
         """Get window status relative to current time.
@@ -303,6 +303,7 @@ class Analyzer:
         carbon_slots: List[CarbonSlot],
         charge_duration_hours: float,
         baseline_time: Optional[datetime] = None,
+        charge_rate_kw: float = 7.4,
     ) -> ChargingWindow:
         """Find the optimal charging window.
 
@@ -311,6 +312,7 @@ class Analyzer:
             carbon_slots: List of carbon data slots
             charge_duration_hours: How long charging takes (e.g., 4.05 hours for 30kWh @ 7.4kW)
             baseline_time: Time for baseline cost comparison (default: 18:00 today)
+            charge_rate_kw: Charger power in kW used to convert duration to kWh (default 7.4)
 
         Returns:
             ChargingWindow with optimal timing and analysis
@@ -354,20 +356,21 @@ class Analyzer:
         avg_carbon = int(sum(s["carbon"] for s in best_window) / len(best_window))
 
         # Calculate total cost (price is pence/kWh, need to convert to £)
-        kwh_charged = charge_duration_hours * 7.4  # Assuming 7.4kW charger
+        kwh_charged = charge_duration_hours * charge_rate_kw
         total_cost = (avg_price * kwh_charged) / 100  # Convert pence to £
         total_carbon = int(avg_carbon * kwh_charged)
 
-        # Calculate baseline comparison
+        # Calculate baseline comparison. Savings are only reported when a real
+        # baseline cost can be computed from actual slot data; otherwise None
+        # (do NOT fabricate a savings figure).
         if baseline_time:
             baseline_cost = self._calculate_baseline_cost(
                 aligned_data, baseline_time, slots_needed, kwh_charged
             )
         else:
-            # Default baseline: 18:00 evening charging
-            baseline_cost = total_cost * 1.5  # Assume 50% more expensive
+            baseline_cost = None
 
-        savings = baseline_cost - total_cost
+        savings = (baseline_cost - total_cost) if baseline_cost is not None else None
 
         # Determine rating and reason
         rating = self.classify_opportunity(best_score)
@@ -436,7 +439,7 @@ class Analyzer:
         baseline_time: datetime,
         slots_needed: int,
         kwh_charged: float,
-    ) -> float:
+    ) -> Optional[float]:
         """Calculate cost at baseline time for comparison.
 
         Args:
@@ -446,7 +449,8 @@ class Analyzer:
             kwh_charged: Total kWh to charge
 
         Returns:
-            Baseline cost in £
+            Baseline cost in £, or None if insufficient slot data exists to
+            compute a real baseline (savings are then unavailable).
         """
         # Find slots starting at baseline time
         baseline_slots = []
@@ -456,8 +460,8 @@ class Analyzer:
                 break
 
         if not baseline_slots or len(baseline_slots) < slots_needed:
-            # No baseline data, return conservative estimate
-            return 5.0  # £5 for 30kWh @ ~16p/kWh
+            # No real baseline data available — do not fabricate a figure.
+            return None
 
         avg_baseline_price = sum(s["price"] for s in baseline_slots) / len(
             baseline_slots

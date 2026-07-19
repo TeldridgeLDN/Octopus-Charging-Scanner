@@ -324,7 +324,11 @@ class MultiDayPlanner:
             # Find optimal window for this day
             baseline_time = target_date.replace(hour=18, minute=0, second=0)
             window = self.analyzer.find_optimal_window(
-                price_slots, carbon_slots, charge_hours, baseline_time
+                price_slots,
+                carbon_slots,
+                charge_hours,
+                baseline_time,
+                charge_rate_kw=self.config["user"]["charging_rate_kw"],
             )
 
             comparison = DayComparison(

@@ -220,6 +220,111 @@ class TestAnalyzer:
         # 29.6 kWh @ 100 gCO2/kWh = 2960 gCO2
         assert window.total_carbon == 2960
 
+    def test_find_optimal_window_respects_charge_rate(self):
+        """Rate-awareness: kWh (and cost) scale with charge_rate_kw, not a
+        hardcoded 7.4kW.
+
+        Arithmetic (8 slots @ 10.0p, 4.0h duration):
+          default 7.4kW -> kWh = 4.0 * 7.4 = 29.6 -> cost = 10.0*29.6/100 = £2.96
+          2.3kW charger -> kWh = 4.0 * 2.3 =  9.2 -> cost = 10.0* 9.2/100 = £0.92
+        """
+        analyzer = Analyzer()
+
+        start_time = datetime(2025, 12, 8, 0, 0, tzinfo=timezone.utc)
+        price_slots = [
+            PriceSlot(start_time + timedelta(minutes=30 * i), 10.0, "octopus")
+            for i in range(8)
+        ]
+        carbon_slots = [
+            CarbonSlot(start_time + timedelta(minutes=30 * i), 100) for i in range(8)
+        ]
+
+        window_23 = analyzer.find_optimal_window(
+            price_slots, carbon_slots, 4.0, charge_rate_kw=2.3
+        )
+        window_default = analyzer.find_optimal_window(price_slots, carbon_slots, 4.0)
+
+        # 4.0h * 2.3kW = 9.2 kWh @ 10p/kWh = £0.92
+        assert abs(window_23.total_cost - 0.92) < 0.001
+        # Default 7.4kW branch remains £2.96 and differs from the 2.3kW result
+        assert abs(window_default.total_cost - 2.96) < 0.001
+        assert window_23.total_cost != window_default.total_cost
+
+    def test_find_optimal_window_savings_from_real_baseline(self):
+        """Savings are computed from a real evening baseline when slots exist.
+
+        Setup (48 half-hourly slots from 00:00):
+          optimal window = 00:00-04:00 (8 slots @ 8.0p)
+          evening baseline @ 18:00 = 8 slots @ 20.0p
+        Default 7.4kW, 4.0h -> kWh = 29.6
+          total_cost    = 8.0  * 29.6 / 100 = £2.368
+          baseline_cost = 20.0 * 29.6 / 100 = £5.92
+          savings       = 5.92 - 2.368       = £3.552
+        """
+        analyzer = Analyzer()
+
+        start_time = datetime(2025, 12, 8, 0, 0, tzinfo=timezone.utc)
+        price_slots = []
+        carbon_slots = []
+        for i in range(48):
+            slot_time = start_time + timedelta(minutes=30 * i)
+            if i < 8:
+                price = 8.0  # cheap overnight (optimal)
+            elif 36 <= i < 44:
+                price = 20.0  # expensive evening baseline (18:00-22:00)
+            else:
+                price = 18.0
+            price_slots.append(PriceSlot(slot_time, price, "octopus"))
+            carbon_slots.append(CarbonSlot(slot_time, 180))
+
+        baseline_time = start_time + timedelta(hours=18)  # 18:00
+        window = analyzer.find_optimal_window(
+            price_slots, carbon_slots, 4.0, baseline_time=baseline_time
+        )
+
+        assert abs(window.total_cost - 2.368) < 0.001
+        assert window.savings_vs_baseline is not None
+        assert abs(window.savings_vs_baseline - 3.552) < 0.001
+
+    def test_find_optimal_window_no_baseline_savings_is_none(self):
+        """Without a baseline time, savings is None (not fabricated via *1.5)."""
+        analyzer = Analyzer()
+
+        start_time = datetime(2025, 12, 8, 0, 0, tzinfo=timezone.utc)
+        price_slots = [
+            PriceSlot(start_time + timedelta(minutes=30 * i), 10.0, "octopus")
+            for i in range(8)
+        ]
+        carbon_slots = [
+            CarbonSlot(start_time + timedelta(minutes=30 * i), 100) for i in range(8)
+        ]
+
+        window = analyzer.find_optimal_window(price_slots, carbon_slots, 4.0)
+
+        assert window.savings_vs_baseline is None
+
+    def test_find_optimal_window_insufficient_baseline_savings_is_none(self):
+        """When baseline slots are insufficient, savings is None (no fake £5)."""
+        analyzer = Analyzer()
+
+        start_time = datetime(2025, 12, 8, 0, 0, tzinfo=timezone.utc)
+        # Only 8 slots of data; baseline time points past the end of the data,
+        # so no baseline window can be formed.
+        price_slots = [
+            PriceSlot(start_time + timedelta(minutes=30 * i), 10.0, "octopus")
+            for i in range(8)
+        ]
+        carbon_slots = [
+            CarbonSlot(start_time + timedelta(minutes=30 * i), 100) for i in range(8)
+        ]
+
+        baseline_time = start_time + timedelta(hours=18)  # beyond available data
+        window = analyzer.find_optimal_window(
+            price_slots, carbon_slots, 4.0, baseline_time=baseline_time
+        )
+
+        assert window.savings_vs_baseline is None
+
     def test_find_optimal_window_empty_data(self):
         """Test that empty data raises ValueError"""
         analyzer = Analyzer()

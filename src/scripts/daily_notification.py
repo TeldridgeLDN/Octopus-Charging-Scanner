@@ -727,8 +727,13 @@ def main():
             logger.info(f"⚡ NEGATIVE PRICING DETECTED! {len(negative_slots)} slots")
             earnings = sum(abs(slot.price) for slot in negative_slots) * kwh / 100
 
-            neg_title = "💰 MONEY-MAKING ALERT: Negative Pricing Tonight!"
-            neg_message = "<b>⚡ You'll be PAID to charge tonight!</b>\n\n"
+            # Derive wording from the earliest negative slot (when the
+            # money-making window starts) — not sorted_neg, which is price-sorted.
+            earliest_neg = min(negative_slots, key=lambda s: s.time)
+            neg_phrase = part_of_day_phrase(earliest_neg.time)
+
+            neg_title = f"💰 MONEY-MAKING ALERT: Negative Pricing {neg_phrase.title()}!"
+            neg_message = f"<b>⚡ You'll be PAID to charge {neg_phrase}!</b>\n\n"
             neg_message += (
                 f"<b>💵 Expected earnings:</b> £{earnings:.2f} for {kwh}kWh\n"
             )
@@ -738,10 +743,12 @@ def main():
             # Show up to 5 best negative slots
             sorted_neg = sorted(negative_slots, key=lambda x: x.price)[:5]
             for slot in sorted_neg:
-                time_str = slot.time.strftime("%H:%M")
+                time_str = slot.time.astimezone(LONDON_TZ).strftime("%H:%M")
                 neg_message += f"  • {time_str}: {slot.price:.2f}p/kWh (PAID £{abs(slot.price * kwh / 100):.2f})\n"
 
-            neg_message += "\n<b>🔋 Action:</b> Plug in tonight - you'll make money!"
+            neg_message += (
+                f"\n<b>🔋 Action:</b> Plug in {neg_phrase} - you'll make money!"
+            )
 
             # Send high-priority alert
             pushover_client.send_notification(
